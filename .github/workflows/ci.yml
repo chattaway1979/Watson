@@ -1,0 +1,46 @@
+name: CI
+
+# Hardening gate for Watson — H&R AI IT Agent.
+# Runs the full verification suite on the pinned Node LTS. No deploy, no
+# external calls, no live IT actions — guardrails are validated by the selftest.
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use pinned Node LTS (.nvmrc = 24)
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      # Reproducible install from the committed lockfile.
+      - name: Install (clean, from lockfile)
+        run: npm ci
+
+      - name: Watson safety + domain selftests
+        run: npm run it-agent:selftest
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Production build
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
+      - name: Lint (ESLint flat config)
+        run: npm run lint
+
+      # Fail the build only on high/critical advisories (the security gate).
+      - name: Dependency audit (high/critical gate)
+        run: npm audit --audit-level=high

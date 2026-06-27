@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --watson-ink: #0f172a;
+}
+
+html, body {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  background: #f8fafc;
+  color: #0f172a;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Ensure tap targets are comfortable on mobile */
+button, a, input, select, textarea { font-family: inherit; }
+.btn { min-height: 44px; }
+
+@keyframes fadein { from { opacity: 0; transform: translateY(4px);} to { opacity:1; transform:none;} }
+.animate-in { animation: fadein .18s ease-out; }

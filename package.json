@@ -1,0 +1,37 @@
+{
+  "name": "watson-hr-ai-it-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Watson - H&R AI IT Agent. Controlled internal AI IT helpdesk foundation for H&R Electric Company.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "it-agent:selftest": "tsx scripts/it-agent-selftest.ts"
+  },
+  "engines": {
+    "node": ">=22.11.0"
+  },
+  "dependencies": {
+    "next": "16.2.9",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.2",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "autoprefixer": "10.4.19",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.9",
+    "postcss": "8.5.15",
+    "tailwindcss": "3.4.6",
+    "tsx": "4.22.4",
+    "typescript": "5.5.3"
+  },
+  "overrides": {
+    "postcss": "8.5.15"
+  }
+}
