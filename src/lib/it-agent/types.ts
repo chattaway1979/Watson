@@ -231,7 +231,8 @@ export const AUDIT_EVENTS = [
   'knowledge_article_updated',
   'admin_note_added',
   'policy_decision_recorded',
-  'connector_mock_called'
+  'connector_mock_called',
+  'connector_live_read_attempted'
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENTS)[number];
 

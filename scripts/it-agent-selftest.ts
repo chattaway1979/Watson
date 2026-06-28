@@ -6,6 +6,7 @@
  * ============================================================ */
 process.env.IT_AGENT_PERSIST = 'off';
 delete process.env.IT_AGENT_LIVE_EXTERNAL_EXECUTION; // ensure default (false)
+delete process.env.IT_AGENT_GRAPH_LIVE_READONLY; // Graph live read-only gate OFF by default
 process.env.AI_PROVIDER = process.env.AI_PROVIDER ?? 'deterministic';
 
 import { __resetDbForTests } from '../src/lib/store/db';
@@ -23,6 +24,7 @@ import { watsonRespond } from '../src/lib/it-agent/deterministic-agent';
 import { mockM365 } from '../src/lib/it-agent/mock-microsoft365';
 import { mockDevice } from '../src/lib/it-agent/mock-device-management';
 import type { Actor } from '../src/lib/it-agent/types';
+import { runGraphReadOnlyTests } from './graph-readonly.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -166,6 +168,9 @@ async function main() {
 
   console.log('\n[10] Live-execution master gate');
   check('isLiveExternalExecutionEnabled() === false', isLiveExternalExecutionEnabled() === false);
+
+  const graph = await runGraphReadOnlyTests();
+  pass += graph.pass; fail += graph.fail; failures.push(...graph.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {
