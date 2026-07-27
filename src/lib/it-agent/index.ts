@@ -23,3 +23,8 @@ export {
   type M365ConnectorResolution,
   type ResolvedConnector
 } from './graph/graph-diagnostics';
+// Server-only production live-read bootstrap + safe readiness status.
+export {
+  bootstrapM365ReadOnlyConnector,
+  graphLiveReadinessStatus
+} from './graph/graph-bootstrap';

@@ -161,7 +161,10 @@ export async function runM365Diagnostic(
   actor: Actor,
   read: M365ReadKey,
   target: string,
-  opts: M365ConnectorResolution & { requireLive?: boolean } = {}
+  // `connector` lets a server caller (e.g. the production bootstrap) supply an
+  // already-resolved connector instead of resolving from env here. `requireLive`
+  // makes the caller's live intent explicit.
+  opts: M365ConnectorResolution & { requireLive?: boolean; connector?: ResolvedConnector } = {}
 ): Promise<M365DiagnosticOutcome> {
   // 1) Authorize through the SAME policy the tool-gateway enforces. A read that
   //    is not allowed — or that (defensively) would require approval — is never
@@ -179,8 +182,10 @@ export async function runM365Diagnostic(
     return { outcome: 'denied', read, target, reason: decision.reason };
   }
 
-  // 2) Resolve the connector (mock by default; live only when fully gated).
-  const resolved = await resolveM365ReadOnlyConnector(opts);
+  // 2) Resolve the connector: use a pre-resolved one if the caller supplied it
+  //    (the production bootstrap does), else resolve from env (mock by default;
+  //    live only when fully gated).
+  const resolved = opts.connector ?? await resolveM365ReadOnlyConnector(opts);
   if (resolved.mode === 'fail_closed') {
     writeAudit({
       actorType: actor.type,

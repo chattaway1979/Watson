@@ -19,7 +19,7 @@
 // ============================================================
 import { actorFromRequestOrNull } from '@/lib/it-agent/session';
 import { roleAtLeast } from '@/lib/it-agent/constants';
-import { runM365Diagnostic, type M365ReadKey } from '@/lib/it-agent';
+import { runM365Diagnostic, bootstrapM365ReadOnlyConnector, type M365ReadKey } from '@/lib/it-agent';
 import { ensureSeeded } from '@/lib/it-agent/knowledge';
 import { ok, fail } from '@/lib/http';
 
@@ -70,9 +70,12 @@ export async function GET(req: Request) {
     const read = readParam as M365ReadKey;
     ensureSeeded();
 
-    // 4) Delegate to the existing service. No live transport is supplied here, so
-    //    this is mock-by-default and fails closed if the live gate is enabled.
-    const outcome = await runM365Diagnostic(actor, read, targetParam);
+    // 4) Resolve the connector through the production bootstrap: mock by default,
+    //    live_readonly only when the full gate + Azure Key Vault + transport are
+    //    in place, else fail_closed. The bootstrap reads server env only — no
+    //    caller-supplied config — and never constructs Azure clients in mock mode.
+    const connector = await bootstrapM365ReadOnlyConnector();
+    const outcome = await runM365Diagnostic(actor, read, targetParam, { connector });
 
     // 5) Map the normalized outcome to HTTP. `denied` (a defensive policy denial
     //    after the admin gate) becomes 403; evidence / not_configured return the
