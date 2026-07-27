@@ -49,47 +49,64 @@ function emptyDb(): DbShape {
   };
 }
 
-const DATA_DIR = path.join(process.cwd(), 'data');
+// Data directory is configurable so production can point at a WRITABLE, PERSISTENT
+// path (e.g. Azure App Service /home) even when the app bundle itself is a
+// read-only run-from-package mount. Defaults to <cwd>/data for local dev.
+const DATA_DIR = (process.env.WATSON_DATA_DIR && process.env.WATSON_DATA_DIR.trim())
+  ? process.env.WATSON_DATA_DIR.trim()
+  : path.join(process.cwd(), 'data');
 const DATA_FILE = path.join(DATA_DIR, 'watson-store.json');
 
 // Persistence is disabled in test/selftest to keep runs hermetic.
 const PERSIST = process.env.IT_AGENT_PERSIST !== 'off';
 
-// Use a global singleton so Next.js dev hot-reload does not create
-// multiple disconnected stores within one process.
-const g = globalThis as unknown as { __watsonDb?: DbShape; __watsonSeeded?: boolean };
+// Global singleton so one process shares one store. `__watsonDbMtime` tracks the
+// file version this process has loaded, so a store written by another
+// process/restart (newer file) is reloaded on the next access — giving correct
+// cross-request state without a database. Our own writes update the mtime, so
+// they never trigger a mid-request reload (references stay stable within a request).
+const g = globalThis as unknown as { __watsonDb?: DbShape; __watsonSeeded?: boolean; __watsonDbMtime?: number };
 
-function load(): DbShape {
-  if (g.__watsonDb) return g.__watsonDb;
-  let db = emptyDb();
-  if (PERSIST) {
-    try {
-      if (fs.existsSync(DATA_FILE)) {
-        const raw = fs.readFileSync(DATA_FILE, 'utf-8');
-        db = { ...emptyDb(), ...(JSON.parse(raw) as DbShape) };
-      }
-    } catch {
-      // Fail safe: corrupt store should not crash the app. Start fresh.
-      db = emptyDb();
+function readFromFile(): DbShape | null {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, 'utf-8');
+      return { ...emptyDb(), ...(JSON.parse(raw) as DbShape) };
     }
+  } catch {
+    // Corrupt store should not crash the app.
   }
-  g.__watsonDb = db;
-  return db;
+  return null;
 }
 
-let writeTimer: NodeJS.Timeout | null = null;
+function load(): DbShape {
+  if (!PERSIST) {
+    if (!g.__watsonDb) g.__watsonDb = emptyDb();
+    return g.__watsonDb;
+  }
+  try {
+    const mtime = fs.existsSync(DATA_FILE) ? fs.statSync(DATA_FILE).mtimeMs : 0;
+    if (!g.__watsonDb || mtime > (g.__watsonDbMtime ?? -1)) {
+      g.__watsonDb = readFromFile() ?? g.__watsonDb ?? emptyDb();
+      g.__watsonDbMtime = mtime;
+    }
+  } catch {
+    if (!g.__watsonDb) g.__watsonDb = emptyDb();
+  }
+  return g.__watsonDb;
+}
+
 function persist(): void {
   if (!PERSIST) return;
-  if (writeTimer) clearTimeout(writeTimer);
-  // Debounce writes; data integrity here is best-effort dev convenience.
-  writeTimer = setTimeout(() => {
-    try {
-      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-      fs.writeFileSync(DATA_FILE, JSON.stringify(g.__watsonDb, null, 2), 'utf-8');
-    } catch {
-      // best-effort
-    }
-  }, 25);
+  // Write immediately (durable before the response returns) and record the new
+  // file mtime as our own so load() does not treat it as a foreign change.
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(DATA_FILE, JSON.stringify(g.__watsonDb, null, 2), 'utf-8');
+    g.__watsonDbMtime = fs.existsSync(DATA_FILE) ? fs.statSync(DATA_FILE).mtimeMs : Date.now();
+  } catch {
+    // best-effort
+  }
 }
 
 export function db(): DbShape {

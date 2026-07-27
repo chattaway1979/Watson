@@ -6,6 +6,10 @@
  *  2) Entra mode: the session contract signals authMode=entra with no demo
  *     identities, so the client hides the demo role switcher.
  * ============================================================ */
+import { execSync } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { startCase } from '../src/lib/it-agent';
 import { GET as sessionGET } from '../src/app/api/it-agent/session/route';
 import type { Actor } from '../src/lib/it-agent/types';
@@ -56,6 +60,21 @@ export async function runPilotFixTests(): Promise<{ pass: number; fail: number; 
   } finally {
     if (savedMode === undefined) delete process.env.WATSON_AUTH_MODE; else process.env.WATSON_AUTH_MODE = savedMode;
     if (savedRole === undefined) delete process.env.WATSON_ADMIN_APP_ROLE; else process.env.WATSON_ADMIN_APP_ROLE = savedRole;
+  }
+
+  // 3) Store durability: a case persists across a FRESH process (deployed apps
+  //    recycle workers, so in-memory-only state would lose cases mid-flow).
+  {
+    let durable = false;
+    try {
+      const dir = mkdtempSync(join(tmpdir(), 'wdb-'));
+      const out = execSync('npx tsx scripts/durability-probe.ts', {
+        env: { ...process.env, IT_AGENT_PERSIST: 'on', WATSON_DATA_DIR: dir },
+        encoding: 'utf8', timeout: 90_000, stdio: ['ignore', 'pipe', 'ignore']
+      });
+      durable = /DURABLE_OK/.test(out);
+    } catch { durable = false; }
+    check('case store persists across a fresh process (durable)', durable);
   }
 
   return { pass, fail, failures };
