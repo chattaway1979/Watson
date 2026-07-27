@@ -13,6 +13,8 @@
 // ============================================================
 import type { Actor } from '../types';
 import { runM365Diagnostic } from '../graph/graph-diagnostics';
+import { isGraphLiveReadOnlyEnabled } from '../graph/graph-config';
+import { ensureMockIdentity } from '../seed-knowledge';
 import { mockDevice } from '../mock-device-management';
 import {
   SCENARIOS, SIMULATED_ACTIONS, classifyScenario, detectPlatform, estimateFor, UNKNOWN_ESTIMATE,
@@ -235,6 +237,10 @@ function buildAdminReport(c: WatsonCase, def: ScenarioDef) {
 // Public engine operations.
 // ------------------------------------------------------------
 export async function startCase(actor: Actor, statement: string, opts: { platform?: Platform; deviceLabel?: string } = {}): Promise<WatsonTurn> {
+  // In MOCK mode, ensure the authenticated employee has a deterministic healthy
+  // mock M365 profile + device so the mock experience demonstrates the full flow
+  // (real pilot users are not in the fixed seed set). Inert in live mode.
+  if (!isGraphLiveReadOnlyEnabled(process.env)) ensureMockIdentity(actor.email, actor.displayName);
   const platform = opts.platform && opts.platform !== 'unknown' ? opts.platform : detectPlatform(statement);
   const managedDevice = mockDevice.lookupDeviceByEmail(actor.email ?? '', WATSON_SERVICE);
   const c = createCase({

@@ -6,6 +6,7 @@ import { WatsonAvatar } from './WatsonAvatar';
 import { api, setRole, getCookieRole } from './api';
 
 interface SessionInfo {
+  authMode?: string;
   actor: { role: string; displayName?: string };
   mode: string;
   liveExecutionEnabled: boolean;
@@ -69,20 +70,31 @@ export function WatsonHeader() {
           })}
         </nav>
 
-        <div className="order-2 ml-auto flex items-center gap-2 sm:order-3">
-          <span className="hidden text-[11px] text-slate-400 sm:inline">Demo role</span>
-          <select
-            value={role}
-            onChange={(e) => changeRole(e.target.value)}
-            className="rounded-md border border-white/20 bg-white/10 px-2 py-2 text-xs text-white"
-            aria-label="Switch demo role"
-          >
-            <option className="text-black" value="employee">Employee</option>
-            <option className="text-black" value="manager">Manager</option>
-            <option className="text-black" value="admin">Admin</option>
-            <option className="text-black" value="owner">Owner</option>
-          </select>
-        </div>
+        {/* Demo role switcher is DEV/TEST only. In Entra mode identity comes from
+            the verified session, so the switcher is hidden (and the server ignores
+            watson_role / refuses role changes). */}
+        {session?.authMode === 'entra' ? (
+          <div className="order-2 ml-auto flex items-center gap-2 sm:order-3">
+            <span className="rounded-md border border-white/20 bg-white/10 px-2 py-1 text-[11px] text-slate-200">
+              {session.actor.displayName ? `${session.actor.displayName} · ` : ''}Signed in
+            </span>
+          </div>
+        ) : (
+          <div className="order-2 ml-auto flex items-center gap-2 sm:order-3">
+            <span className="hidden text-[11px] text-slate-400 sm:inline">Demo role</span>
+            <select
+              value={role}
+              onChange={(e) => changeRole(e.target.value)}
+              className="rounded-md border border-white/20 bg-white/10 px-2 py-2 text-xs text-white"
+              aria-label="Switch demo role"
+            >
+              <option className="text-black" value="employee">Employee</option>
+              <option className="text-black" value="manager">Manager</option>
+              <option className="text-black" value="admin">Admin</option>
+              <option className="text-black" value="owner">Owner</option>
+            </select>
+          </div>
+        )}
       </div>
       {session && (
         <div className="bg-watson-slate/60 px-4 py-1 text-center text-[11px] text-slate-300">

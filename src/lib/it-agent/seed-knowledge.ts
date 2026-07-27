@@ -1,7 +1,7 @@
 // ============================================================
 // Watson — H&R AI IT Agent : Knowledge Base + Mock Data Seeds
 // ============================================================
-import { db, uuid, nowIso, isSeeded, markSeeded } from '../store/db';
+import { db, uuid, nowIso, isSeeded, markSeeded, save } from '../store/db';
 import { writeAudit } from './audit';
 import type { KnowledgeArticle, MockM365User, MockDevice, TicketCategory } from './types';
 
@@ -425,4 +425,52 @@ export function seedAll(force = false): { articles: number; users: number; devic
   }
   markSeeded();
   return { articles: d.knowledge.length, users: d.mockUsers.length, devices: d.mockDevices.length };
+}
+
+// Ensure a deterministic, HEALTHY mock M365 profile + managed device exists for a
+// given employee email. Used so the mock employee experience works for any
+// authenticated pilot user (whose real email is not in the fixed seed set) —
+// otherwise every scenario escalates because the account "isn't found". This adds
+// MOCK data only (read by the mock connector); it is inert in live mode. Idempotent.
+export function ensureMockIdentity(email: string | undefined, displayName?: string): void {
+  const e = (email ?? '').trim().toLowerCase();
+  if (!e || !e.includes('@')) return;
+  const d = db();
+  if (!d.mockUsers.some((u) => u.email.toLowerCase() === e)) {
+    const user: Omit<MockM365User, 'id'> = {
+      email: e,
+      displayName: displayName?.trim() || e.split('@')[0],
+      jobTitle: 'Employee',
+      department: 'H&R Electric',
+      accountEnabled: true,
+      licenses: ['Microsoft 365 Business Premium'],
+      mfaEnabled: true,
+      mfaMethods: ['Microsoft Authenticator'],
+      mailboxType: 'user',
+      mailboxSizeGb: 8.2,
+      mailboxQuotaGb: 50,
+      groups: ['All Staff'],
+      lastSignIn: '2026-06-26T09:00:00.000Z'
+    };
+    d.mockUsers.push({ id: uuid(), ...user });
+  }
+  if (!d.mockDevices.some((dev) => dev.ownerEmail.toLowerCase() === e)) {
+    const device: Omit<MockDevice, 'id'> = {
+      ownerEmail: e,
+      deviceName: 'HRE-PILOT-01',
+      os: 'Windows',
+      osVersion: '11 23H2',
+      serialNumber: 'SN-PILOT-0001',
+      lastCheckIn: '2026-06-26T09:00:00.000Z',
+      diskFreeGb: 120,
+      diskTotalGb: 512,
+      antivirusStatus: 'healthy',
+      patchStatus: 'up_to_date',
+      complianceStatus: 'compliant',
+      remoteSupportAvailable: true,
+      managedBy: 'intune_mock'
+    };
+    d.mockDevices.push({ id: uuid(), ...device });
+  }
+  save();
 }

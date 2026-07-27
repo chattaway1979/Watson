@@ -10,7 +10,7 @@ import { isLiveExternalExecutionEnabled } from '../src/lib/it-agent/constants';
 import {
   startCase, addEmployeeMessage, decideCaseApproval, runSimulatedRepair,
   stopSimulatedRepair, submitVerification, attachScreenshot,
-  getCaseForActor, currentOpenCase, listAllCases
+  getCaseForActor, currentOpenCase, listAllCases, runM365Diagnostic
 } from '../src/lib/it-agent';
 import { toEmployeeView, toAdminView } from '../src/lib/it-agent/watson/cases';
 import { GET as watsonGET, POST as watsonPOST } from '../src/app/api/it-agent/watson/route';
@@ -22,7 +22,6 @@ import type { Actor } from '../src/lib/it-agent/types';
 
 const empA: Actor = { id: 'emp-A', type: 'user', role: 'employee', email: 'carlos.field@hrelectriccompany.com', displayName: 'Carlos' };
 const empB: Actor = { id: 'emp-B', type: 'user', role: 'employee', email: 'dana.est@hrelectriccompany.com', displayName: 'Dana' };
-const empU: Actor = { id: 'emp-U', type: 'user', role: 'employee', email: 'nobody@nowhere.com', displayName: 'Nobody' };
 const req = (h: Record<string, string>, body?: unknown) =>
   new Request('http://localhost/api/it-agent/watson', { method: body ? 'POST' : 'GET', headers: h, ...(body ? { body: JSON.stringify(body) } : {}) });
 
@@ -91,8 +90,12 @@ export async function runWatsonEmployeeTests(): Promise<{ pass: number; fail: nu
   check('ipad teams selects device + app checks', teams.case.evidence.some((e) => /device/i.test(e.check)));
   const od = await startCase(empA, 'my onedrive is not syncing on windows');
   check('onedrive selects account + sync checks', od.case.scenario === 'onedrive_sync' && od.case.evidence.length >= 2);
-  const unavail = await startCase(empU, 'Outlook keeps asking me to sign in on windows');
-  check('unavailable evidence is NOT treated as healthy', unavail.case.confidence !== 'high');
+  // "Unavailable/unknown evidence is not fabricated as healthy" — proven at the
+  // diagnostic layer. (Pilot CASE users get a deterministic mock identity so their
+  // own flow can resolve; an arbitrary unknown target still returns not_found.)
+  const adminDiag: Actor = { id: 'adm-diag', type: 'admin', role: 'admin', email: 'admin.it@hrelectriccompany.com', displayName: 'Admin' };
+  const ghost = await runM365Diagnostic(adminDiag, 'lookup_user', 'ghost-unseeded@nowhere.invalid');
+  check('unavailable/unknown evidence is NOT fabricated as healthy', ghost.outcome === 'evidence' && ghost.result.state !== 'ok' && ghost.result.data === null);
   check('raw diagnostic payloads never reach the employee view', (() => {
     const v = JSON.stringify(toEmployeeView(outlook.case));
     return !v.includes('@odata') && !v.includes('onPremises') && !v.includes('userPrincipalName') && !v.includes(TOKEN) && !v.includes(SECRET);
@@ -103,7 +106,7 @@ export async function runWatsonEmployeeTests(): Promise<{ pass: number; fail: nu
   // ================================================================
   check('all three gates pass for a healthy Outlook case', outlook.case.tripleCheck?.passed === true && outlook.case.tripleCheck.diagnosisGate.passed && outlook.case.tripleCheck.suitabilityGate.passed && outlook.case.tripleCheck.safetyGate.passed);
   check('failed suitability gate (no safe repair) blocks + escalates', sp.case.state === 'escalated' && sp.case.tripleCheck?.suitabilityGate.passed === false);
-  check('unavailable/contradictory lowers confidence -> escalate not confident repair', unavail.case.state === 'escalated' || unavail.case.confidence !== 'high');
+  check('unknown target stays honest (never a confident healthy claim)', ghost.outcome === 'evidence' && ghost.result.state === 'not_found');
   check('confidence is only high/moderate/low', ['high', 'moderate', 'low'].includes(String(outlook.case.confidence)));
   check('no fake percentage in employee-facing confidence', !/\d+\s*%/.test(JSON.stringify(toEmployeeView(outlook.case))));
   check('proposed repair is employee-approvable (safety gate)', outlook.case.proposedSolution?.approvalLevel === 'employee');
