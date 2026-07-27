@@ -26,6 +26,7 @@ import { mockDevice } from '../src/lib/it-agent/mock-device-management';
 import type { Actor } from '../src/lib/it-agent/types';
 import { runGraphReadOnlyTests } from './graph-readonly.selftest';
 import { runGraphDiagnosticsTests } from './graph-diagnostics.selftest';
+import { runGraphDiagnosticsRouteTests } from './graph-diagnostics-route.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -175,6 +176,9 @@ async function main() {
 
   const diag = await runGraphDiagnosticsTests();
   pass += diag.pass; fail += diag.fail; failures.push(...diag.failures);
+
+  const diagRoute = await runGraphDiagnosticsRouteTests();
+  pass += diagRoute.pass; fail += diagRoute.fail; failures.push(...diagRoute.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {

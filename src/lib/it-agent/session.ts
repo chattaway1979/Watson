@@ -37,6 +37,19 @@ export function actorFromRequest(req: Request): Actor {
   return actorForRole(m?.[1]);
 }
 
+// Like actorFromRequest, but returns null when NO identity signal is present
+// (no x-watson-role header and no watson_role cookie). Lets a route distinguish
+// an unauthenticated request (401) from an authenticated-but-under-privileged
+// one (403), instead of silently defaulting to the employee identity.
+export function actorFromRequestOrNull(req: Request): Actor | null {
+  const header = req.headers.get('x-watson-role');
+  if (header) return actorForRole(header);
+  const cookie = req.headers.get('cookie') ?? '';
+  const m = cookie.match(/(?:^|;\s*)watson_role=([^;]+)/);
+  if (m?.[1]) return actorForRole(m[1]);
+  return null;
+}
+
 export function demoIdentities() {
   return VALID_ROLES.map((r) => ({ ...DEMO_IDENTITIES[r], role: r }));
 }
