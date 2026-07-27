@@ -37,17 +37,45 @@ export const failClosedSecretProvider: SecretProvider = {
   }
 };
 
-// Placeholder for the future real Azure Key Vault provider. It is NOT
-// wired to the Azure SDK in this build (that is a later, separately
-// reviewed slice) and fails closed so nothing can accidentally go live.
-export function createAzureKeyVaultSecretProvider(_keyVaultUrl: string): SecretProvider {
+// Narrow, injected abstraction over an Azure Key Vault secrets client. It mirrors
+// the single method we need from @azure/keyvault-secrets `SecretClient.getSecret`
+// (name -> { value }). We deliberately do NOT depend on the Azure SDK here: a
+// thin production adapter implements this interface around the SDK in a later,
+// separately reviewed slice; unit tests inject an in-memory fake. This keeps the
+// dependency surface minimal and the provider fully testable with no network.
+export interface KeyVaultSecretClient {
+  getSecret(name: string): Promise<{ value?: string | null } | null>;
+}
+
+// Azure Key Vault SecretProvider. Resolves the client SECRET VALUE from Key Vault
+// via an injected client. FAILS CLOSED (returns null) on every abnormal condition:
+// missing vault config, missing/blank secret ref, absent client, secret not found,
+// empty value, malformed response, access denied, or an upstream throw. The secret
+// value is never logged, audited, cached, or embedded in an error.
+export function createAzureKeyVaultSecretProvider(opts: {
+  keyVaultUrl: string;
+  client: KeyVaultSecretClient;
+}): SecretProvider {
+  const keyVaultUrl = opts?.keyVaultUrl?.trim() ?? '';
+  const client = opts?.client;
   return {
-    id: 'azure-key-vault (not-wired-in-this-build)',
-    async getSecret(): Promise<string | null> {
-      // Intentionally not implemented here: wiring @azure/identity +
-      // @azure/keyvault-secrets is deferred to a dedicated, reviewed slice.
-      // Fail closed until then.
-      return null;
+    id: 'azure-key-vault',
+    async getSecret(ref: string): Promise<string | null> {
+      // Fail closed on incomplete configuration or a missing client seam.
+      if (!keyVaultUrl) return null;
+      if (typeof ref !== 'string' || ref.trim().length === 0) return null;
+      if (!client || typeof client.getSecret !== 'function') return null;
+      try {
+        const secret = await client.getSecret(ref.trim());
+        const value = secret?.value;
+        // Not found / empty / malformed => fail closed. Only a non-empty string passes.
+        if (typeof value !== 'string' || value.length === 0) return null;
+        return value;
+      } catch {
+        // Access denied / upstream throw / transport error => fail closed. The
+        // caught error is intentionally NOT surfaced (it may echo sensitive data).
+        return null;
+      }
     }
   };
 }

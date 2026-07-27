@@ -14,3 +14,12 @@ export * from './deterministic-agent';
 export { seedAll } from './seed-knowledge';
 export { mockM365, connectorStatus } from './mock-microsoft365';
 export { mockDevice, deviceConnectorStatus } from './mock-device-management';
+// Server-only read-only Microsoft 365 diagnostics (mock by default; live gated).
+export {
+  runM365Diagnostic,
+  resolveM365ReadOnlyConnector,
+  type M365ReadKey,
+  type M365DiagnosticOutcome,
+  type M365ConnectorResolution,
+  type ResolvedConnector
+} from './graph/graph-diagnostics';

@@ -25,6 +25,7 @@ import { mockM365 } from '../src/lib/it-agent/mock-microsoft365';
 import { mockDevice } from '../src/lib/it-agent/mock-device-management';
 import type { Actor } from '../src/lib/it-agent/types';
 import { runGraphReadOnlyTests } from './graph-readonly.selftest';
+import { runGraphDiagnosticsTests } from './graph-diagnostics.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -171,6 +172,9 @@ async function main() {
 
   const graph = await runGraphReadOnlyTests();
   pass += graph.pass; fail += graph.fail; failures.push(...graph.failures);
+
+  const diag = await runGraphDiagnosticsTests();
+  pass += diag.pass; fail += diag.fail; failures.push(...diag.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {

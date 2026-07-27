@@ -232,7 +232,9 @@ export const AUDIT_EVENTS = [
   'admin_note_added',
   'policy_decision_recorded',
   'connector_mock_called',
-  'connector_live_read_attempted'
+  'connector_live_read_attempted',
+  'diagnostic_read_performed',
+  'diagnostic_read_denied'
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENTS)[number];
 
