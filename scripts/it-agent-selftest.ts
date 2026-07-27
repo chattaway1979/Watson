@@ -28,6 +28,7 @@ import { runGraphReadOnlyTests } from './graph-readonly.selftest';
 import { runGraphDiagnosticsTests } from './graph-diagnostics.selftest';
 import { runGraphDiagnosticsRouteTests } from './graph-diagnostics-route.selftest';
 import { runGraphLiveIntegrationTests } from './graph-live-integration.selftest';
+import { runAuthAndPilotReadinessTests } from './auth-and-pilot-readiness.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -183,6 +184,9 @@ async function main() {
 
   const liveIntegration = await runGraphLiveIntegrationTests();
   pass += liveIntegration.pass; fail += liveIntegration.fail; failures.push(...liveIntegration.failures);
+
+  const authPilot = await runAuthAndPilotReadinessTests();
+  pass += authPilot.pass; fail += authPilot.fail; failures.push(...authPilot.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {

@@ -28,3 +28,17 @@ export {
   bootstrapM365ReadOnlyConnector,
   graphLiveReadinessStatus
 } from './graph/graph-bootstrap';
+// Auth-mode seam + safe deployment/readiness status (value-free).
+export {
+  watsonAuthMode,
+  getServerActor,
+  actorFromEntra,
+  type WatsonAuthMode
+} from './session';
+export {
+  m365LiveReadiness,
+  deploymentConfigValidation,
+  type M365LiveReadiness,
+  type ConnectorReadiness,
+  type DeploymentConfigValidation
+} from './deployment';
