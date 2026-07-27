@@ -43,6 +43,13 @@ export function WatsonShell() {
     return r;
   }
 
+  // Approve, then run ONLY if approval actually granted (never chain past an
+  // escalation or a non-granted state — one approval, one action).
+  async function approveAndRun() {
+    const r = await post('approve');
+    if (r.ok && r.data.state === 'technician_working') await post('run');
+  }
+
   async function send() {
     const t = text.trim();
     if (!t) return;
@@ -60,6 +67,9 @@ export function WatsonShell() {
       <div className="flex flex-col items-center">
         <WatsonParticles state={particleState} amplitude={amp} />
         {!c ? <h1 className="mt-3 text-xl font-semibold text-slate-100">How can I help?</h1> : null}
+        <p className="mt-2 rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-300" role="note">
+          Pilot — Watson simulates diagnostics and repairs. Nothing is changed without your approval.
+        </p>
       </div>
 
       {/* Transcript — every spoken response is also shown as text. */}
@@ -89,7 +99,7 @@ export function WatsonShell() {
       {/* Approval controls — consequential actions always have a visible control. */}
       {showApproval ? (
         <div className="flex flex-wrap gap-2">
-          <button disabled={busy} onClick={() => post('approve').then(() => post('run'))} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white">Approve</button>
+          <button disabled={busy} onClick={approveAndRun} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300">Approve</button>
           <button disabled={busy} onClick={() => post('decline')} className="rounded-lg bg-slate-700 px-4 py-2 text-sm text-slate-100">Not now</button>
           <button disabled={busy} onClick={() => { setText('I have a question: '); }} className="rounded-lg bg-slate-700 px-4 py-2 text-sm text-slate-100">Ask a question</button>
           <button disabled={busy} onClick={() => post('technician')} className="rounded-lg bg-slate-700 px-4 py-2 text-sm text-slate-100">Request a technician</button>
@@ -120,18 +130,23 @@ export function WatsonShell() {
       <div className="flex items-center gap-2">
         <button
           aria-pressed={listening}
+          aria-label={listening ? 'Listening — release to stop (mock)' : 'Push to talk (mock)'}
           onMouseDown={() => setListening(true)}
           onMouseUp={() => setListening(false)}
           onMouseLeave={() => setListening(false)}
+          onKeyDown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setListening(true); } }}
+          onKeyUp={(e) => { if (e.key === ' ' || e.key === 'Enter') setListening(false); }}
+          onBlur={() => setListening(false)}
           title="Push to talk (mock)"
-          className={`rounded-full px-3 py-2 text-sm ${listening ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-100'}`}
+          className={`rounded-full px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${listening ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-100'}`}
         >🎤</button>
         <input
           value={text}
+          aria-label="Describe your problem"
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') send(); }}
           placeholder="Describe your problem…"
-          className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500"
+          className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400"
         />
         <label className="cursor-pointer rounded-full bg-slate-700 px-3 py-2 text-sm text-slate-100" title="Attach a screenshot">
           📎

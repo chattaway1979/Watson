@@ -9,7 +9,8 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "it-agent:selftest": "tsx scripts/it-agent-selftest.ts"
+    "it-agent:selftest": "tsx scripts/it-agent-selftest.ts",
+    "verify:config": "tsx scripts/verify-config.ts"
   },
   "engines": {
     "node": ">=22.11.0"

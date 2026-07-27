@@ -260,6 +260,8 @@ async function investigate(actor: Actor, c: WatsonCase): Promise<WatsonTurn> {
   // Auto-escalation scenarios (lost device -> security; unknown -> general).
   if (def.autoEscalate) {
     c.businessImpact = def.autoEscalate === 'security' ? 'individual' : c.businessImpact;
+    // Record the primary hypothesis so the reports read meaningfully.
+    c.hypotheses = [{ key: def.primaryHypothesis.key, label: def.primaryHypothesis.label, strength: 'strongly_indicated', primary: true }];
     escalate(actor, c, def.autoEscalate === 'security' ? 'lost_or_stolen_device' : 'unclassified_problem', def, def.autoEscalate === 'security');
     return { case: c, reply: c.messages[c.messages.length - 1].text };
   }

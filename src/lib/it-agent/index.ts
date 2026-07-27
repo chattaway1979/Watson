@@ -38,9 +38,11 @@ export {
 export {
   m365LiveReadiness,
   deploymentConfigValidation,
+  deploymentHealth,
   type M365LiveReadiness,
   type ConnectorReadiness,
-  type DeploymentConfigValidation
+  type DeploymentConfigValidation,
+  type DeploymentHealth
 } from './deployment';
 // Employee Watson case engine (server-only; mock/read-only/deterministic).
 export {

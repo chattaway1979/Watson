@@ -86,3 +86,32 @@ export function deploymentConfigValidation(env: NodeJS.ProcessEnv = process.env)
     reasonCodes: [...reasonCodes, ...m365.reasonCodes]
   };
 }
+
+export interface DeploymentHealth {
+  healthy: boolean;
+  authMode: WatsonAuthMode;
+  liveReadGateEnabled: boolean;
+  liveExecutionEnabled: boolean;
+  reasonCodes: string[];   // safe codes only, never values
+}
+
+// Fail-closed deployment health for App Service health checks + the verify:config
+// gate. In entra mode the app is UNHEALTHY unless an admin selector is configured
+// (otherwise no one could ever be authorized) — this is the "startup failure when
+// required Entra-mode configuration is incomplete" signal, surfaced as a 503 by
+// /api/health rather than a hard process crash (so demo mode always boots).
+export function deploymentHealth(env: NodeJS.ProcessEnv = process.env): DeploymentHealth {
+  const authMode = watsonAuthMode(env);
+  const adminSelectorConfigured =
+    Boolean(env.WATSON_ADMIN_ENTRA_GROUP_ID?.trim()) || Boolean(env.WATSON_ADMIN_APP_ROLE?.trim());
+  const liveExecutionEnabled = (env.IT_AGENT_LIVE_EXTERNAL_EXECUTION ?? 'false').toLowerCase() === 'true';
+  const reasonCodes: string[] = [];
+  if (authMode === 'entra' && !adminSelectorConfigured) reasonCodes.push('entra_admin_selector_missing');
+  return {
+    healthy: reasonCodes.length === 0,
+    authMode,
+    liveReadGateEnabled: m365LiveReadiness(env).liveReadGateEnabled,
+    liveExecutionEnabled,
+    reasonCodes
+  };
+}
