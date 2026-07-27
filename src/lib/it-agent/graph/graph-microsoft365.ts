@@ -18,8 +18,31 @@
 import type { Actor } from '../types';
 import { writeAudit } from '../audit';
 import type { GraphConfig, GraphHttpClient } from './graph-config';
-import { loadGraphConfig } from './graph-config';
+import { loadGraphConfig, isSameGraphOrigin } from './graph-config';
 import { mockM365 } from '../mock-microsoft365';
+
+// ------------------------------------------------------------
+// Resilience / correctness bounds for the live read path. All GETs here are
+// idempotent reads, so bounded retry of transient failures is safe.
+// ------------------------------------------------------------
+const MAX_RETRIES = 3;            // total attempts = 1 + MAX_RETRIES
+const BASE_BACKOFF_MS = 250;      // exponential base for backoff
+const MAX_BACKOFF_MS = 8_000;     // ceiling for any single wait
+const MAX_RETRY_AFTER_MS = 30_000; // never honor a server Retry-After beyond this
+const MAX_PAGES = 50;             // hard ceiling on @odata.nextLink following
+
+// Weak factors that must NOT be counted as multi-factor authentication:
+// a password is the first factor, and email OTP is an account-recovery (SSPR)
+// channel rather than a valid second factor in most tenants.
+const WEAK_AUTH_METHOD = /passwordAuthenticationMethod|emailAuthenticationMethod/i;
+
+// Injectable timing seams so retry/backoff is fully deterministic under test
+// (tests pass a no-op sleep and a fixed rng); production uses real timers.
+export interface GraphConnectorDeps {
+  sleep?: (ms: number) => Promise<void>;
+  rng?: () => number;
+}
+const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export type ReadState = 'ok' | 'not_found' | 'unknown' | 'unavailable';
 
@@ -77,13 +100,16 @@ type GraphCollection = { value?: unknown[] };
 // Real Microsoft Graph read-only connector.
 // FAILS CLOSED: throws unless the gate is on AND config is complete.
 // ------------------------------------------------------------
-export function createGraphConnector(config: GraphConfig, http: GraphHttpClient): M365ReadOnlyConnector {
+export function createGraphConnector(config: GraphConfig, http: GraphHttpClient, deps: GraphConnectorDeps = {}): M365ReadOnlyConnector {
   if (!config.liveReadOnlyEnabled) {
     throw new Error('MsGraphConnector blocked: live read-only gate (IT_AGENT_GRAPH_LIVE_READONLY) is disabled.');
   }
   if (!config.tenantId || !config.clientId || !config.clientSecretRef) {
     throw new Error('MsGraphConnector blocked: required Graph config (tenantId, clientId, clientSecretRef) is incomplete.');
   }
+
+  const sleep = deps.sleep ?? realSleep;
+  const rng = deps.rng ?? Math.random;
 
   let cachedToken: string | null = null;
   async function token(): Promise<string> {
@@ -92,9 +118,69 @@ export function createGraphConnector(config: GraphConfig, http: GraphHttpClient)
     return cachedToken;
   }
 
-  async function getJson(path: string): Promise<{ status: number; body: unknown }> {
-    const t = await token();
-    return http.get(path, t);
+  // Compute the wait before the next retry. Honors a server Retry-After when
+  // present (bounded), otherwise exponential backoff with full jitter. Never
+  // unbounded — protects against retry storms.
+  function backoffMs(attempt: number, retryAfterSeconds?: number): number {
+    if (typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds)) {
+      return Math.min(Math.max(0, retryAfterSeconds) * 1000, MAX_RETRY_AFTER_MS);
+    }
+    const ceiling = Math.min(BASE_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS);
+    return Math.floor(rng() * ceiling); // full jitter in [0, ceiling)
+  }
+
+  // A single Graph GET with bounded retry. Retries ONLY transient, retry-safe
+  // statuses (429 and 5xx). Permanent outcomes — 401/403 (authz), 404, other
+  // 4xx — are returned immediately and never retried (no retry storms on
+  // permanent authorization/configuration failures). Network errors on an
+  // idempotent read are likewise retried up to the cap.
+  async function getJson(path: string): Promise<{ status: number; body: unknown; retryAfterSeconds?: number }> {
+    let attempt = 0;
+    for (;;) {
+      let res: { status: number; body: unknown; retryAfterSeconds?: number };
+      try {
+        const t = await token();
+        res = await http.get(path, t);
+      } catch (err) {
+        if (attempt >= MAX_RETRIES) throw err;
+        await sleep(backoffMs(attempt));
+        attempt++;
+        continue;
+      }
+      const transient = res.status === 429 || res.status >= 500;
+      if (transient && attempt < MAX_RETRIES) {
+        await sleep(backoffMs(attempt, res.retryAfterSeconds));
+        attempt++;
+        continue;
+      }
+      return res;
+    }
+  }
+
+  // Read a Graph collection, following @odata.nextLink across pages. Each
+  // nextLink is verified to target the SAME Graph origin before it is fetched,
+  // so a tampered response cannot redirect reads (or the token) to a foreign
+  // host. Bounded by MAX_PAGES. The returned status is the first page's status
+  // so callers can distinguish 404/401/403/other from success.
+  async function getCollection(path: string): Promise<{ status: number; values: unknown[] }> {
+    const first = await getJson(path);
+    if (first.status !== 200 || !first.body || typeof first.body !== 'object') {
+      return { status: first.status, values: [] };
+    }
+    const values: unknown[] = [];
+    let body = first.body as GraphCollection & { '@odata.nextLink'?: unknown };
+    let pages = 0;
+    for (;;) {
+      if (Array.isArray(body.value)) values.push(...body.value);
+      pages++;
+      const next = body['@odata.nextLink'];
+      if (typeof next !== 'string' || pages >= MAX_PAGES) break;
+      if (!isSameGraphOrigin(next, config.graphBaseUrl)) break; // refuse foreign host
+      const page = await getJson(next);
+      if (page.status !== 200 || !page.body || typeof page.body !== 'object') break;
+      body = page.body as GraphCollection & { '@odata.nextLink'?: unknown };
+    }
+    return { status: 200, values };
   }
 
   const enc = (s: string) => encodeURIComponent(s.trim());
@@ -129,11 +215,10 @@ export function createGraphConnector(config: GraphConfig, http: GraphHttpClient)
     async checkLicenseStatus(email, actor) {
       auditLiveRead(actor, 'checkLicenseStatus', email, { endpoint: '/users/{id}/licenseDetails' });
       try {
-        const r = await getJson(`/users/${enc(email)}/licenseDetails?$select=skuPartNumber`);
+        const r = await getCollection(`/users/${enc(email)}/licenseDetails?$select=skuPartNumber`);
         if (r.status === 404) return { source: 'graph', state: 'not_found', data: null };
         if (r.status !== 200) return { source: 'graph', state: 'unavailable', data: null, note: `Graph returned HTTP ${r.status}` };
-        const coll = (r.body as GraphCollection)?.value ?? [];
-        const licenses = coll
+        const licenses = r.values
           .map((x) => (x as Record<string, unknown>)?.skuPartNumber)
           .filter((x): x is string => typeof x === 'string');
         return { source: 'graph', state: 'ok', data: { email, licenses } };
@@ -145,17 +230,26 @@ export function createGraphConnector(config: GraphConfig, http: GraphHttpClient)
     async checkMfaStatus(email, actor) {
       auditLiveRead(actor, 'checkMfaStatus', email, { endpoint: '/users/{id}/authentication/methods' });
       try {
-        const r = await getJson(`/users/${enc(email)}/authentication/methods`);
+        const r = await getCollection(`/users/${enc(email)}/authentication/methods`);
         if (r.status === 404) return { source: 'graph', state: 'not_found', data: null };
         // 401/403 typically => missing UserAuthenticationMethod.Read.All or licensing limits.
         if (r.status === 401 || r.status === 403) {
           return { source: 'graph', state: 'unavailable', data: null, note: 'MFA read not permitted (needs UserAuthenticationMethod.Read.All / Entra ID licensing).' };
         }
         if (r.status !== 200) return { source: 'graph', state: 'unknown', data: null, note: `Graph returned HTTP ${r.status}` };
-        const methods = ((r.body as GraphCollection)?.value ?? []).map((m) => String((m as Record<string, unknown>)['@odata.type'] ?? ''));
-        const strong = methods.filter((t) => t && !/passwordAuthenticationMethod/i.test(t));
+        const methods = r.values.map((m) => String((m as Record<string, unknown>)['@odata.type'] ?? ''));
+        // Registered STRONG factors only: exclude password (first factor) and
+        // email OTP (recovery channel). NOTE: the presence of a registered
+        // strong method proves capability, NOT that MFA is enforced by policy
+        // (Conditional Access / per-user enforcement state is not readable here).
+        const strong = methods.filter((t) => t && !WEAK_AUTH_METHOD.test(t));
         const friendly = strong.map((t) => t.replace('#microsoft.graph.', '').replace('AuthenticationMethod', ''));
-        return { source: 'graph', state: 'ok', data: { email, mfaEnabled: strong.length > 0, mfaMethods: friendly } };
+        return {
+          source: 'graph',
+          state: 'ok',
+          data: { email, mfaEnabled: strong.length > 0, mfaMethods: friendly },
+          note: 'Reflects registered strong authentication methods, not enforced MFA policy.'
+        };
       } catch {
         return { source: 'graph', state: 'unavailable', data: null, note: 'Graph request failed' };
       }
@@ -187,10 +281,10 @@ export function createGraphConnector(config: GraphConfig, http: GraphHttpClient)
     async checkGroupMembership(email, actor) {
       auditLiveRead(actor, 'checkGroupMembership', email, { endpoint: '/users/{id}/transitiveMemberOf' });
       try {
-        const r = await getJson(`/users/${enc(email)}/transitiveMemberOf/microsoft.graph.group?$select=displayName`);
+        const r = await getCollection(`/users/${enc(email)}/transitiveMemberOf/microsoft.graph.group?$select=displayName`);
         if (r.status === 404) return { source: 'graph', state: 'not_found', data: null };
         if (r.status !== 200) return { source: 'graph', state: 'unavailable', data: null, note: `Graph returned HTTP ${r.status}` };
-        const groups = ((r.body as GraphCollection)?.value ?? [])
+        const groups = r.values
           .map((g) => (g as Record<string, unknown>)?.displayName)
           .filter((x): x is string => typeof x === 'string');
         return { source: 'graph', state: 'ok', data: { email, groups } };
