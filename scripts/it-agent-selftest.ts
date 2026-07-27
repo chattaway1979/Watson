@@ -29,6 +29,7 @@ import { runGraphDiagnosticsTests } from './graph-diagnostics.selftest';
 import { runGraphDiagnosticsRouteTests } from './graph-diagnostics-route.selftest';
 import { runGraphLiveIntegrationTests } from './graph-live-integration.selftest';
 import { runAuthAndPilotReadinessTests } from './auth-and-pilot-readiness.selftest';
+import { runWatsonEmployeeTests } from './watson-employee.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -187,6 +188,9 @@ async function main() {
 
   const authPilot = await runAuthAndPilotReadinessTests();
   pass += authPilot.pass; fail += authPilot.fail; failures.push(...authPilot.failures);
+
+  const watsonEmp = await runWatsonEmployeeTests();
+  pass += watsonEmp.pass; fail += watsonEmp.fail; failures.push(...watsonEmp.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {

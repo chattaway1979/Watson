@@ -42,3 +42,24 @@ export {
   type ConnectorReadiness,
   type DeploymentConfigValidation
 } from './deployment';
+// Employee Watson case engine (server-only; mock/read-only/deterministic).
+export {
+  startCase,
+  addEmployeeMessage,
+  decideApproval as decideCaseApproval,
+  runSimulatedRepair,
+  stopSimulatedRepair,
+  submitVerification,
+  attachScreenshot,
+  type WatsonTurn
+} from './watson/engine';
+export {
+  getCaseForActor,
+  listCasesForEmployee,
+  currentOpenCase,
+  listAllCases,
+  type WatsonCase,
+  type CaseState,
+  type Platform,
+  type ScenarioKey
+} from './watson/cases';

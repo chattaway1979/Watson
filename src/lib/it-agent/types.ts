@@ -234,7 +234,29 @@ export const AUDIT_EVENTS = [
   'connector_mock_called',
   'connector_live_read_attempted',
   'diagnostic_read_performed',
-  'diagnostic_read_denied'
+  'diagnostic_read_denied',
+  // Employee Watson case lifecycle (outcome + identifiers only; never transcript
+  // text, secrets, tokens, or raw payloads).
+  'case_created',
+  'employee_message_recorded',
+  'diagnostic_plan_created',
+  'diagnosis_proposed',
+  'diagnosis_blocked',
+  'repair_estimated',
+  'employee_approval_requested',
+  'employee_approval_granted',
+  'employee_approval_declined',
+  'simulated_action_started',
+  'simulated_action_stopped',
+  'simulated_action_completed',
+  'verification_requested',
+  'verification_passed',
+  'verification_failed',
+  'case_escalated',
+  'case_resolved',
+  'case_closed',
+  'case_reopened',
+  'report_generated'
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENTS)[number];
 

@@ -19,6 +19,7 @@ import type {
   MockM365User,
   MockDevice
 } from '../it-agent/types';
+import type { WatsonCase } from '../it-agent/watson/cases';
 
 export interface DbShape {
   tickets: Ticket[];
@@ -29,6 +30,7 @@ export interface DbShape {
   knowledge: KnowledgeArticle[];
   mockUsers: MockM365User[];
   mockDevices: MockDevice[];
+  cases: WatsonCase[];
   counters: Record<string, number>;
 }
 
@@ -42,6 +44,7 @@ function emptyDb(): DbShape {
     knowledge: [],
     mockUsers: [],
     mockDevices: [],
+    cases: [],
     counters: { ticket: 1000, approval: 1000, audit: 1 }
   };
 }
