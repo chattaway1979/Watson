@@ -20,7 +20,13 @@ export async function GET() {
       authMode: h.authMode,
       liveReadGateEnabled: h.liveReadGateEnabled,
       liveExecutionEnabled: h.liveExecutionEnabled,
-      reasonCodes: h.reasonCodes
+      reasonCodes: h.reasonCodes,
+      // Build provenance (015). A staged pilot must be able to prove over HTTP
+      // which commit is actually being served — without it a stale build is
+      // indistinguishable from a fresh one. A public commit hash is not
+      // sensitive; null when the deployment recorded none.
+      commit: process.env.WATSON_DEPLOYED_SHA?.trim() || null,
+      environment: process.env.WATSON_ENVIRONMENT?.trim() || 'unspecified'
     },
     { status: h.healthy ? 200 : 503, headers: { 'Cache-Control': 'no-store' } }
   );

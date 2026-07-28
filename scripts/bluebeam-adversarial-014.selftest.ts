@@ -394,3 +394,44 @@ export async function runBluebeamAdversarialTests(): Promise<{ pass: number; fai
 
   return { pass, fail, failures };
 }
+
+// ------------------------------------------------------------
+// 015: build-provenance regression. The staged-pilot gate requires proving over
+// HTTP which commit is served; before this the health endpoint exposed no
+// commit at all and a stale build was indistinguishable from a fresh one.
+// ------------------------------------------------------------
+export async function runHealthProvenanceTests(): Promise<{ pass: number; fail: number; failures: string[] }> {
+  let pass = 0, fail = 0;
+  const failures: string[] = [];
+  const check = (name: string, cond: boolean, detail = '') => {
+    if (cond) { pass++; console.log('  ✅ ' + name); }
+    else { fail++; failures.push(name + (detail ? ` — ${detail}` : '')); console.log('  ❌ ' + name + (detail ? ` — ${detail}` : '')); }
+  };
+  console.log('\n[79] Build provenance on /api/health (015)');
+
+  const prior = process.env.WATSON_DEPLOYED_SHA;
+  const priorEnv = process.env.WATSON_ENVIRONMENT;
+  try {
+    const { GET } = await import('../src/app/api/health/route');
+
+    process.env.WATSON_DEPLOYED_SHA = '0f981be8ad73de0489f9f15510a343073af1dad9';
+    process.env.WATSON_ENVIRONMENT = 'staged-015';
+    const body = await (await GET()).json() as Record<string, unknown>;
+    check('health reports the deployed commit', body.commit === '0f981be8ad73de0489f9f15510a343073af1dad9', String(body.commit));
+    check('health reports the environment name', body.environment === 'staged-015', String(body.environment));
+    check('health still reports both gates', body.liveReadGateEnabled === false && body.liveExecutionEnabled === false);
+    check('health still reports auth mode', typeof body.authMode === 'string');
+    // Provenance must never invent a value.
+    delete process.env.WATSON_DEPLOYED_SHA;
+    const none = await (await GET()).json() as Record<string, unknown>;
+    check('absent provenance is null, never fabricated', none.commit === null, String(none.commit));
+    // No secret or identifier may ride along on a PUBLIC endpoint.
+    const serialized = JSON.stringify(none);
+    check('health exposes no tenant/client/secret values',
+      !/tenantId|clientId|secret|token|vault/i.test(serialized), serialized.slice(0, 120));
+  } finally {
+    if (prior === undefined) delete process.env.WATSON_DEPLOYED_SHA; else process.env.WATSON_DEPLOYED_SHA = prior;
+    if (priorEnv === undefined) delete process.env.WATSON_ENVIRONMENT; else process.env.WATSON_ENVIRONMENT = priorEnv;
+  }
+  return { pass, fail, failures };
+}
