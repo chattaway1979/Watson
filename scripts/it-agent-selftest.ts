@@ -38,6 +38,7 @@ import { runEndpointAgentTests } from './endpoint-agent-012.selftest';
 import { runEmployeeBluebeamTests } from './employee-bluebeam-012.selftest';
 import { runBluebeamIntegrationTests } from './bluebeam-integration-013.selftest';
 import { runBluebeamAdversarialTests, runHealthProvenanceTests } from './bluebeam-adversarial-014.selftest';
+import { runCaseFamilyIntegrityTests } from './case-family-integrity-017.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -226,6 +227,9 @@ async function main() {
 
   const healthProv = await runHealthProvenanceTests();
   pass += healthProv.pass; fail += healthProv.fail; failures.push(...healthProv.failures);
+
+  const familyIntegrity = await runCaseFamilyIntegrityTests();
+  pass += familyIntegrity.pass; fail += familyIntegrity.fail; failures.push(...familyIntegrity.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {

@@ -186,6 +186,17 @@ export interface WatsonCase {
     stillUnknown: string[];
     recommendedNextStep: string[];
   } | null;
+  // 017 evidence integrity. Once a family has been chosen AND evidence
+  // collection has begun, ordinary employee answers must not re-run global
+  // classification. Without this an answer like "yes, I have markups that have
+  // not synced" moved a sync case into the Tool Chest family and discarded the
+  // evidence already gathered.
+  familyLocked: boolean;
+  // Audit of every deliberate family change, never a silent swap.
+  familyHistory: Array<{ from: ScenarioKey; to: ScenarioKey; reason: string; at: string }>;
+  // Evidence from a superseded family is preserved and visibly marked stale
+  // rather than deleted, so a technician can still see what was asked.
+  invalidatedEvidence: Array<{ family: ScenarioKey; item: EvidenceItem }>;
   auditRefs: string[];
 
   // What Watson still needs from the employee (drives one-question-at-a-time).
@@ -241,6 +252,9 @@ export function createCase(input: {
     employeeReport: null,
     adminReport: null,
     technicianNotes: null,
+    familyLocked: false,
+    familyHistory: [],
+    invalidatedEvidence: [],
     auditRefs: [],
     needs: [],
     known: {}

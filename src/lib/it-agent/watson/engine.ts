@@ -22,6 +22,7 @@ import {
 } from './bluebeam-bridge';
 import { bluebeamFamily } from '../skills/bluebeam/families';
 import { causeProfile } from '../support/causes';
+import { classifyMessagePurpose, correctionTargetText } from './message-purpose';
 import { mockDevice } from '../mock-device-management';
 import {
   SCENARIOS, SIMULATED_ACTIONS, classifyScenario, detectPlatform, estimateFor, UNKNOWN_ESTIMATE,
@@ -274,8 +275,19 @@ export async function startCase(actor: Actor, statement: string, opts: { platfor
   return investigate(actor, c);
 }
 
-async function investigate(actor: Actor, c: WatsonCase): Promise<WatsonTurn> {
-  const scenario = classifyScenario([c.originalStatement, ...c.messages.filter((m) => m.role === 'employee').map((m) => m.text)].join(' '));
+async function investigate(actor: Actor, c: WatsonCase, opts: { reclassify?: boolean } = {}): Promise<WatsonTurn> {
+  // 017 ACTIVE-FAMILY LOCK. Once a family is chosen and evidence collection has
+  // begun, the family is authoritative and ordinary answers cannot move it.
+  // Previously this line combined the original statement with EVERY later
+  // employee message, so an evidence answer containing another family's
+  // vocabulary silently re-classified the case and discarded its evidence.
+  // Only an explicit correction (opts.reclassify) may re-run classification.
+  const locked = c.familyLocked && !opts.reclassify;
+  const scenario = locked
+    ? c.scenario
+    // Not yet locked: classify from the ORIGINAL statement only. Later messages
+    // are answers, not restatements of the problem.
+    : classifyScenario(opts.reclassify ? c.originalStatement : c.originalStatement);
   const def = SCENARIOS[scenario];
   c.scenario = scenario;
   c.problemSummary = def.label;
@@ -359,6 +371,8 @@ async function investigateBluebeam(actor: Actor, c: WatsonCase, def: ScenarioDef
   const q = nextBluebeamQuestion(familyKey, c.known);
   if (q) {
     c.state = 'waiting_for_employee';
+    // Evidence collection has begun — the family is now authoritative.
+    c.familyLocked = true;
     c.needs = [q.evidenceKey];
     auditCase(actor, 'diagnostic_plan_created', c, { needs: q.evidenceKey, remaining: q.remaining });
     watsonSay(c, q.question);
@@ -418,13 +432,48 @@ async function investigateBluebeam(actor: Actor, c: WatsonCase, def: ScenarioDef
 }
 
 // Employee sends a message (answer to a follow-up, a correction, or a new detail).
+// 017: deliberately change the issue family. Never silent, never lossy.
+function applyFamilyCorrection(actor: Actor, c: WatsonCase, newScenario: string, reason: string): void {
+  const from = c.scenario;
+  // Preserve prior evidence, visibly marked stale, rather than deleting it.
+  for (const item of c.evidence) c.invalidatedEvidence.push({ family: from, item: { ...item, strength: 'stale' } });
+  c.familyHistory.push({ from, to: newScenario as WatsonCase['scenario'], reason, at: c.updatedAt });
+
+  c.scenario = newScenario as WatsonCase['scenario'];
+  c.evidence = [];
+  c.hypotheses = [];
+  c.tripleCheck = null;
+  c.confidence = null;
+  // Approval and action state must NEVER cross a family boundary.
+  c.proposedSolution = null;
+  c.approval = { required: false, level: 'none', state: 'none' };
+  c.estimate = null;
+  c.technicianNotes = null;
+  // Answers gathered mid-flow live in `known`, not `evidence`. Preserve them as
+  // stale items before clearing, otherwise a correction would silently delete
+  // the very answers the employee had already given.
+  for (const k of Object.keys(c.known)) {
+    if (!k.startsWith('bluebeam.')) continue;
+    c.invalidatedEvidence.push({
+      family: from,
+      item: {
+        check: k,
+        strength: 'stale',
+        summary: `You told me: ${String(c.known[k]).replace(/_/g, ' ')} (recorded before the issue type changed)`
+      }
+    });
+    delete c.known[k];
+  }
+  c.needs = [];
+  c.familyLocked = false; // the corrected family will re-lock on its first question
+  auditCase(actor, 'diagnostic_plan_created', c, { familyChanged: true, from, to: c.scenario });
+}
+
 export async function addEmployeeMessage(actor: Actor, caseId: string, text: string): Promise<WatsonTurn | null> {
   const c = getCaseForActor(caseId, actor);
   if (!c) return null;
 
-  // A finished case is IMMUTABLE. Previously any further message appended
-  // "Thank you — noted." to a resolved transcript until reload; a new problem
-  // must open a new case instead.
+  // A finished case is IMMUTABLE — including against corrections.
   if (c.state === 'resolved' || c.state === 'closed' || c.state === 'escalated') {
     return {
       case: c,
@@ -436,47 +485,79 @@ export async function addEmployeeMessage(actor: Actor, caseId: string, text: str
   employeeSay(c, text);
   auditCase(actor, 'employee_message_recorded', c, { role: 'employee' });
 
-  // Technician request at any time.
-  if (/technician|human|person|someone|escalate/i.test(text)) {
+  // ---- Message PURPOSE decides what happens (017) ----------------------
+  const familyKey = isBluebeamScenarioKey(c.scenario) ? familyKeyForScenario(c.scenario) : null;
+  const evidenceKey = c.needs.length > 0 ? c.needs[0] : null;
+  const awaitingEvidence = Boolean(familyKey && evidenceKey);
+  const interpreted = familyKey && evidenceKey ? interpretBluebeamAnswer(familyKey, evidenceKey, text) : null;
+  const purpose = classifyMessagePurpose(text, { awaitingEvidence, answerInterpretable: interpreted !== null });
+
+  if (purpose === 'new_issue') {
+    const msg = 'That sounds like a separate problem, so I will open a new issue for it rather than mixing it with this one.';
+    watsonSay(c, msg);
+    touch(c);
+    return { case: c, reply: msg, requiresNewCase: true };
+  }
+
+  if (purpose === 'ambiguous_correction') {
+    // One clarification question. NEVER an automatic family change.
+    const q = 'Just to be sure — do you want me to change what this issue is about, or is that part of what you are seeing now?';
+    watsonSay(c, q);
+    touch(c);
+    return { case: c, reply: q, followupQuestion: q };
+  }
+
+  if (purpose === 'explicit_correction') {
+    const target = correctionTargetText(text);
+    const newScenario = target ? classifyScenario(target) : 'unknown';
+    if (!target || newScenario === 'unknown' || newScenario === c.scenario) {
+      const q = 'Understood — what would you say the problem actually is?';
+      watsonSay(c, q);
+      touch(c);
+      return { case: c, reply: q, followupQuestion: q };
+    }
+    const fromLabel = c.problemSummary || 'the previous issue';
+    applyFamilyCorrection(actor, c, newScenario, 'employee_explicit_correction');
+    c.originalStatement = target;
+    const notice = `Thank you — I had this recorded as ${fromLabel}. I am changing it and starting again with the right questions. Nothing from the previous questions will be used as evidence.`;
+    watsonSay(c, notice);
+    return investigate(actor, c, { reclassify: true });
+  }
+
+  if (purpose === 'technician_request') {
     escalate(actor, c, 'employee_requested_technician', SCENARIOS[c.scenario]);
     return { case: c, reply: c.messages[c.messages.length - 1].text };
   }
 
-  // Correction of the device assumption (invalidate prior platform).
+  if (purpose === 'evidence_answer' && familyKey && evidenceKey) {
+    if (interpreted === null) {
+      // Unrecognised: re-ask rather than record a guess as evidence.
+      const again = nextBluebeamQuestion(familyKey, c.known);
+      const q = again ? again.question : 'Could you tell me a little more about what you are seeing?';
+      watsonSay(c, q);
+      touch(c);
+      return { case: c, reply: q, followupQuestion: q };
+    }
+    c.known[evidenceKey] = interpreted;
+    c.needs = [];
+    auditCase(actor, 'employee_message_recorded', c, { evidence: evidenceKey });
+    // The family is locked, so this cannot re-classify the case.
+    return investigate(actor, c);
+  }
+
+  // ---- Ordinary follow-up ---------------------------------------------
+  // Platform correction is still honoured, but only for non-Bluebeam cases and
+  // only before the family locks — it must not reset a diagnosed case.
   const corrected = detectPlatform(text);
-  if (corrected !== 'unknown' && corrected !== c.platform) {
+  if (!c.familyLocked && corrected !== 'unknown' && corrected !== c.platform) {
     c.platform = corrected;
     c.known.platform = corrected;
-    // Re-investigate with the corrected assumption; clears stale evidence.
     c.evidence = []; c.hypotheses = []; c.tripleCheck = null; c.proposedSolution = null;
     return investigate(actor, c);
   }
-
-  // If we were waiting for the platform, and they answered it.
   if (c.state === 'waiting_for_employee' && c.needs.includes('platform') && corrected !== 'unknown') {
     c.platform = corrected; c.needs = [];
     return investigate(actor, c);
-  }
-
-  // Bluebeam evidence answer for the exact question just asked.
-  if (c.needs.length > 0 && isBluebeamScenarioKey(c.scenario)) {
-    const familyKey = familyKeyForScenario(c.scenario);
-    const evidenceKey = c.needs[0];
-    if (familyKey) {
-      const value = interpretBluebeamAnswer(familyKey, evidenceKey, text);
-      if (value === null) {
-        // Unrecognised answer: re-ask rather than record a guess as evidence.
-        const again = nextBluebeamQuestion(familyKey, c.known);
-        const q = again ? again.question : 'Could you tell me a little more about what you are seeing?';
-        watsonSay(c, q);
-        touch(c);
-        return { case: c, reply: q, followupQuestion: q };
-      }
-      c.known[evidenceKey] = value;
-      c.needs = [];
-      auditCase(actor, 'employee_message_recorded', c, { evidence: evidenceKey });
-      return investigate(actor, c);
-    }
   }
 
   touch(c);
