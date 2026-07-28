@@ -9,13 +9,14 @@
 // ============================================================
 import { headers } from 'next/headers';
 import { trustedIdentityFromHeaders } from '@/lib/it-agent/rbac/http';
-import { actorHasCapability, currentRoles } from '@/lib/it-agent/rbac/service';
+import { actorHasCapability, currentRoles, ensureBootstrap } from '@/lib/it-agent/rbac/service';
 import { AccessAndRoles } from '@/components/it-agent/rbac/AccessAndRoles';
 
 export const dynamic = 'force-dynamic';
 
 export default async function AccessAndRolesPage() {
   const h = await headers();
+  ensureBootstrap();
   const actor = trustedIdentityFromHeaders(h);
   const authorized = actor ? actorHasCapability(actor, 'rbac.registry.read') : false;
 

@@ -116,6 +116,9 @@ export function actorHasCapability(actor: TrustedIdentity, cap: Capability): boo
 function requireCapability(
   actor: TrustedIdentity | null, cap: Capability, operation: string, targetOid: string | null
 ): Result<TrustedIdentity> {
+  // Every privileged operation passes through here, so this is the one place
+  // bootstrap needs to be attempted.
+  ensureBootstrap();
   if (!actor) {
     audit({ actor: null, targetOid, operation, outcome: 'refused', reason: 'unauthenticated' });
     return refuse('unauthenticated');
@@ -180,6 +183,21 @@ export function runBootstrap(env: NodeJS.ProcessEnv = process.env): Result<{ app
   if (!commit.ok) return refuse('persistence_failure');
   return { ok: true, data: { applied: true, reason: 'bootstrap_role_admin_created' } };
 }
+
+// Idempotent bootstrap guard, invoked at the top of every RBAC entry point.
+//
+// 021C-1 found runBootstrap() implemented and tested but wired into NO request
+// path: on a fresh deployment nobody would ever become the first role
+// administrator and the whole feature would be unusable. Calling it here is
+// safe because it is a no-op once any active role administrator exists, it
+// reads configuration only, and no request input can reach it.
+let bootstrapAttempted = false;
+export function ensureBootstrap(env: NodeJS.ProcessEnv = process.env): void {
+  if (bootstrapAttempted) return;
+  bootstrapAttempted = true;
+  try { runBootstrap(env); } catch { /* bootstrap must never break a request */ }
+}
+export function __resetBootstrapGuardForTests(): void { bootstrapAttempted = false; }
 
 // ------------------------------------------------------------
 // Preview / confirm
