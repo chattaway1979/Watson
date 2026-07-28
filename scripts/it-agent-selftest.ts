@@ -34,6 +34,8 @@ import { runDeploymentPilotTests } from './deployment-pilot.selftest';
 import { runPilotFixTests } from './pilot-fixes.selftest';
 import { runGraphPrereqPostureTests } from './graph-prereq-posture.selftest';
 import { runGraphManagedIdentityTests } from './graph-managed-identity.selftest';
+import { runEndpointAgentTests } from './endpoint-agent-012.selftest';
+import { runEmployeeBluebeamTests } from './employee-bluebeam-012.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -207,6 +209,12 @@ async function main() {
 
   const miGraph = await runGraphManagedIdentityTests();
   pass += miGraph.pass; fail += miGraph.fail; failures.push(...miGraph.failures);
+
+  const endpointAgent = await runEndpointAgentTests();
+  pass += endpointAgent.pass; fail += endpointAgent.fail; failures.push(...endpointAgent.failures);
+
+  const empBluebeam = await runEmployeeBluebeamTests();
+  pass += empBluebeam.pass; fail += empBluebeam.fail; failures.push(...empBluebeam.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {
