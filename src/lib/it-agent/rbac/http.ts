@@ -61,11 +61,23 @@ export function localTestIdentity(env: NodeJS.ProcessEnv = process.env): Trusted
   });
 }
 
-export function trustedIdentityFromHeaders(headers: HeaderBag): TrustedIdentity | null {
+export function trustedIdentityFromHeaders(
+  headers: HeaderBag,
+  env: NodeJS.ProcessEnv = process.env
+): TrustedIdentity | null {
+  // 021C-1A: when the local seam is configured, it WINS over any inbound
+  // principal header. On a developer machine there is no Easy Auth in front of
+  // the app to have produced that header, so an `x-ms-client-principal` arriving
+  // here is browser-supplied and must never select the actor. In production the
+  // seam returns null (NODE_ENV check), so the platform principal path below is
+  // completely unchanged.
+  const local = localTestIdentity(env);
+  if (local) return local;
+
   const raw = headers.get('x-ms-client-principal');
-  // The platform principal always wins. The local seam is only consulted when
-  // the platform supplied nothing, and never in production.
-  if (!raw) return localTestIdentity();
+  // Absence of a platform principal is an authentication failure, never a
+  // fallback to another header or a cookie.
+  if (!raw) return null;
   let principal: Principal;
   try {
     principal = JSON.parse(Buffer.from(raw, 'base64').toString('utf8')) as Principal;

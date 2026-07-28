@@ -131,6 +131,45 @@ function requireCapability(
 }
 
 // ------------------------------------------------------------
+// Process-wide RBAC runtime state.
+//
+// 021C-1A: Next.js compiles this module into more than one module graph (the
+// react-server layer that renders the page, the route-handler layer that serves
+// /api/it-agent/rbac/*), and dev hot reload re-evaluates it again. Module-level
+// `let`/`Map` state therefore is NOT one instance — bootstrap could run against
+// one copy while the page read another, and previews issued by one copy were
+// invisible to the other. The durable store is already globalThis-backed, so
+// anchoring the runtime state the same way makes bootstrap, authorization, page
+// rendering and RBAC routes provably share one state. Production persistence is
+// untouched: this changes only where the in-process guard lives.
+// ------------------------------------------------------------
+export type BootstrapOutcome =
+  | 'not_attempted'
+  | 'bootstrap_not_configured'
+  | 'persistent_admin_exists'
+  | 'bootstrap_role_admin_created'
+  | 'bootstrap_persistence_failure'
+  | 'bootstrap_error';
+
+interface RbacGlobals {
+  bootstrapAttempted: boolean;
+  bootstrapOutcome: BootstrapOutcome;
+  previews: Map<string, PendingPreview>;
+}
+
+function rbacGlobals(): RbacGlobals {
+  const g = globalThis as unknown as { __watsonRbacRuntime?: RbacGlobals };
+  if (!g.__watsonRbacRuntime) {
+    g.__watsonRbacRuntime = {
+      bootstrapAttempted: false,
+      bootstrapOutcome: 'not_attempted',
+      previews: new Map<string, PendingPreview>()
+    };
+  }
+  return g.__watsonRbacRuntime;
+}
+
+// ------------------------------------------------------------
 // Bootstrap — explicit, configuration-backed, immutable-id only.
 // ------------------------------------------------------------
 export interface BootstrapPosture {
@@ -160,6 +199,8 @@ export function bootstrapPosture(env: NodeJS.ProcessEnv = process.env): Bootstra
 export function runBootstrap(env: NodeJS.ProcessEnv = process.env): Result<{ applied: boolean; reason: string }> {
   const raw = env.WATSON_RBAC_BOOTSTRAP_OID?.trim() ?? '';
   if (!raw || !OID_SHAPE.test(raw)) {
+    // Covers both "not set" and "set but not a well-formed immutable object id".
+    // A malformed value is never normalised into something usable.
     audit({ actor: null, targetOid: null, operation: 'bootstrap', outcome: 'refused', reason: 'bootstrap_not_configured', source: 'bootstrap' });
     return { ok: true, data: { applied: false, reason: 'bootstrap_not_configured' } };
   }
@@ -191,13 +232,41 @@ export function runBootstrap(env: NodeJS.ProcessEnv = process.env): Result<{ app
 // administrator and the whole feature would be unusable. Calling it here is
 // safe because it is a no-op once any active role administrator exists, it
 // reads configuration only, and no request input can reach it.
-let bootstrapAttempted = false;
+// 021C-1A additionally makes the guard PROCESS-WIDE and records WHY bootstrap
+// did or did not apply. Previously the outcome existed only as a row in the RBAC
+// audit store and the catch swallowed everything, so an operator staring at
+// "You do not have permission to administer Watson roles" had no way to learn
+// that bootstrap had deliberately no-opped because the store already contained an
+// active role administrator. The recorded value is a fixed category from a closed
+// vocabulary — never an object id, claim, cookie, token or secret.
 export function ensureBootstrap(env: NodeJS.ProcessEnv = process.env): void {
-  if (bootstrapAttempted) return;
-  bootstrapAttempted = true;
-  try { runBootstrap(env); } catch { /* bootstrap must never break a request */ }
+  const g = rbacGlobals();
+  if (g.bootstrapAttempted) return;
+  g.bootstrapAttempted = true;
+  try {
+    const r = runBootstrap(env);
+    g.bootstrapOutcome = r.ok
+      ? (r.data.reason as BootstrapOutcome)
+      : 'bootstrap_persistence_failure';
+  } catch {
+    // Bootstrap must never break a request — but it must not vanish either.
+    g.bootstrapOutcome = 'bootstrap_error';
+  }
+  // Safe, category-only, emitted once per process.
+  console.info(`[watson][rbac] bootstrap outcome: ${g.bootstrapOutcome}`);
 }
-export function __resetBootstrapGuardForTests(): void { bootstrapAttempted = false; }
+
+// Diagnostic accessor. Reports the category only; the configured object id is
+// never surfaced through it.
+export function lastBootstrapOutcome(): BootstrapOutcome {
+  return rbacGlobals().bootstrapOutcome;
+}
+
+export function __resetBootstrapGuardForTests(): void {
+  const g = rbacGlobals();
+  g.bootstrapAttempted = false;
+  g.bootstrapOutcome = 'not_attempted';
+}
 
 // ------------------------------------------------------------
 // Preview / confirm
@@ -224,7 +293,11 @@ export interface RolePreview {
 }
 
 interface PendingPreview extends RolePreview { consumed: boolean; issuedAt: number }
-const PREVIEWS = new Map<string, PendingPreview>();
+// Process-wide, for the same reason as the bootstrap guard: a preview issued by
+// one module copy must be consumable by another. A module-local Map made
+// preview -> confirm fail as `stale_preview` whenever the two requests happened
+// to be served by different copies of this module.
+const PREVIEWS = rbacGlobals().previews;
 const PREVIEW_TTL_MS = 10 * 60 * 1000;
 
 export function __resetPreviewsForTests(): void { PREVIEWS.clear(); }

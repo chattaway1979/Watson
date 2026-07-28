@@ -52,13 +52,29 @@ function emptyDb(): DbShape {
 // Data directory is configurable so production can point at a WRITABLE, PERSISTENT
 // path (e.g. Azure App Service /home) even when the app bundle itself is a
 // read-only run-from-package mount. Defaults to <cwd>/data for local dev.
-const DATA_DIR = (process.env.WATSON_DATA_DIR && process.env.WATSON_DATA_DIR.trim())
-  ? process.env.WATSON_DATA_DIR.trim()
-  : path.join(process.cwd(), 'data');
-const DATA_FILE = path.join(DATA_DIR, 'watson-store.json');
+//
+// 021C-1A: these are read PER CALL, never snapshotted into a module-level const.
+// ES module imports are hoisted and evaluated BEFORE any statement in the
+// importing module's body, so a harness that does
+//     process.env.IT_AGENT_PERSIST = 'off';
+//     import { ... } from '../src/lib/store/db';
+// had this module already evaluated — and the snapshot said "persist". The
+// self-test suite therefore wrote its synthetic fixtures, INCLUDING ACTIVE
+// watson_role_admin ASSIGNMENTS, into the real local dev store, which then made
+// RBAC bootstrap a permanent no-op for every subsequent local run. Reading the
+// environment at the point of use removes the ordering hazard entirely.
+function dataDir(): string {
+  const configured = process.env.WATSON_DATA_DIR?.trim();
+  return configured ? configured : path.join(process.cwd(), 'data');
+}
+function dataFile(): string {
+  return path.join(dataDir(), 'watson-store.json');
+}
 
 // Persistence is disabled in test/selftest to keep runs hermetic.
-const PERSIST = process.env.IT_AGENT_PERSIST !== 'off';
+function persistEnabled(): boolean {
+  return process.env.IT_AGENT_PERSIST !== 'off';
+}
 
 // Global singleton so one process shares one store. `__watsonDbMtime` tracks the
 // file version this process has loaded, so a store written by another
@@ -69,8 +85,9 @@ const g = globalThis as unknown as { __watsonDb?: DbShape; __watsonSeeded?: bool
 
 function readFromFile(): DbShape | null {
   try {
-    if (fs.existsSync(DATA_FILE)) {
-      const raw = fs.readFileSync(DATA_FILE, 'utf-8');
+    const file = dataFile();
+    if (fs.existsSync(file)) {
+      const raw = fs.readFileSync(file, 'utf-8');
       return { ...emptyDb(), ...(JSON.parse(raw) as DbShape) };
     }
   } catch {
@@ -80,12 +97,13 @@ function readFromFile(): DbShape | null {
 }
 
 function load(): DbShape {
-  if (!PERSIST) {
+  if (!persistEnabled()) {
     if (!g.__watsonDb) g.__watsonDb = emptyDb();
     return g.__watsonDb;
   }
   try {
-    const mtime = fs.existsSync(DATA_FILE) ? fs.statSync(DATA_FILE).mtimeMs : 0;
+    const file = dataFile();
+    const mtime = fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0;
     if (!g.__watsonDb || mtime > (g.__watsonDbMtime ?? -1)) {
       g.__watsonDb = readFromFile() ?? g.__watsonDb ?? emptyDb();
       g.__watsonDbMtime = mtime;
@@ -97,16 +115,24 @@ function load(): DbShape {
 }
 
 function persist(): void {
-  if (!PERSIST) return;
+  if (!persistEnabled()) return;
   // Write immediately (durable before the response returns) and record the new
   // file mtime as our own so load() does not treat it as a foreign change.
   try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify(g.__watsonDb, null, 2), 'utf-8');
-    g.__watsonDbMtime = fs.existsSync(DATA_FILE) ? fs.statSync(DATA_FILE).mtimeMs : Date.now();
+    const dir = dataDir();
+    const file = dataFile();
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(g.__watsonDb, null, 2), 'utf-8');
+    g.__watsonDbMtime = fs.existsSync(file) ? fs.statSync(file).mtimeMs : Date.now();
   } catch {
     // best-effort
   }
+}
+
+// Test/diagnostic seam: the resolved store path and whether writes are enabled.
+// Reports posture only — never store contents.
+export function storagePosture(): { persistEnabled: boolean; dataFile: string } {
+  return { persistEnabled: persistEnabled(), dataFile: dataFile() };
 }
 
 export function db(): DbShape {

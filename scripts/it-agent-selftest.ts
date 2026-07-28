@@ -7,6 +7,11 @@
 process.env.IT_AGENT_PERSIST = 'off';
 delete process.env.IT_AGENT_LIVE_EXTERNAL_EXECUTION; // ensure default (false)
 delete process.env.IT_AGENT_GRAPH_LIVE_READONLY; // Graph live read-only gate OFF by default
+// 021C-1A: the RBAC local-browser seam is configured by exporting these in a
+// shell. The suite must describe the code, not that shell, so they are cleared
+// here; every test that needs them passes an explicit env object instead.
+delete process.env.WATSON_LOCAL_TEST_OID;
+delete process.env.WATSON_RBAC_BOOTSTRAP_OID;
 process.env.AI_PROVIDER = process.env.AI_PROVIDER ?? 'deterministic';
 
 import { __resetDbForTests } from '../src/lib/store/db';
@@ -41,6 +46,7 @@ import { runBluebeamAdversarialTests, runHealthProvenanceTests } from './bluebea
 import { runCaseFamilyIntegrityTests } from './case-family-integrity-017.selftest';
 import { runRbacSecurityCoreTests } from './rbac-security-core-021a.selftest';
 import { runRbacUiTests } from './rbac-ui-021b.selftest';
+import { runRbacLocalBootstrapTests } from './rbac-local-bootstrap-021c1a.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -238,6 +244,9 @@ async function main() {
 
   const rbacUi = await runRbacUiTests();
   pass += rbacUi.pass; fail += rbacUi.fail; failures.push(...rbacUi.failures);
+
+  const rbacLocalBootstrap = await runRbacLocalBootstrapTests();
+  pass += rbacLocalBootstrap.pass; fail += rbacLocalBootstrap.fail; failures.push(...rbacLocalBootstrap.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {

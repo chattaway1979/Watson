@@ -8,17 +8,16 @@
 // becomes the thing standing between someone and a role change.
 // ============================================================
 import { headers } from 'next/headers';
-import { trustedIdentityFromHeaders } from '@/lib/it-agent/rbac/http';
-import { actorHasCapability, currentRoles, ensureBootstrap } from '@/lib/it-agent/rbac/service';
+import { authorizeRbacEntry } from '@/lib/it-agent/rbac/entry';
 import { AccessAndRoles } from '@/components/it-agent/rbac/AccessAndRoles';
 
 export const dynamic = 'force-dynamic';
 
 export default async function AccessAndRolesPage() {
   const h = await headers();
-  ensureBootstrap();
-  const actor = trustedIdentityFromHeaders(h);
-  const authorized = actor ? actorHasCapability(actor, 'rbac.registry.read') : false;
+  // 021C-1A: the bootstrap -> identity -> capability sequence lives in one
+  // shared, tested module so the page and the RBAC routes cannot drift apart.
+  const { actor, authorized, roles } = authorizeRbacEntry(h, 'rbac.registry.read');
 
   if (!authorized) {
     return (
@@ -41,7 +40,7 @@ export default async function AccessAndRolesPage() {
   return (
     <main className="min-h-screen bg-slate-950 p-4 sm:p-8">
       <AccessAndRoles
-        actorRoles={currentRoles(actor!.oid)}
+        actorRoles={roles}
         actorOid={actor!.oid}
       />
     </main>

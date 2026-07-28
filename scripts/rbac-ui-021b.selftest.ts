@@ -48,11 +48,15 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
 
   console.log('\n[92] RBAC UI — identity boundary and routes');
   {
-    check('platform principal resolves to trusted identity', trustedIdentityFromHeaders(principalHeader(ADMIN))?.oid === ADMIN);
-    check('absent principal -> no identity', trustedIdentityFromHeaders({ get: () => null }) === null);
-    check('malformed principal -> no identity', trustedIdentityFromHeaders({ get: () => 'not-base64-json' }) === null);
+    // An explicit env is passed so these assertions describe the code, not the
+    // shell the suite happens to run in. An operator with WATSON_LOCAL_TEST_OID
+    // exported for browser validation must not change what these prove.
+    const NO_SEAM = {} as NodeJS.ProcessEnv;
+    check('platform principal resolves to trusted identity', trustedIdentityFromHeaders(principalHeader(ADMIN), NO_SEAM)?.oid === ADMIN);
+    check('absent principal -> no identity', trustedIdentityFromHeaders({ get: () => null }, NO_SEAM) === null);
+    check('malformed principal -> no identity', trustedIdentityFromHeaders({ get: () => 'not-base64-json' }, NO_SEAM) === null);
     check('principal without oid claim -> no identity',
-      trustedIdentityFromHeaders({ get: () => Buffer.from(JSON.stringify({ claims: [{ typ: 'name', val: 'X' }] })).toString('base64') }) === null);
+      trustedIdentityFromHeaders({ get: () => Buffer.from(JSON.stringify({ claims: [{ typ: 'name', val: 'X' }] })).toString('base64') }, NO_SEAM) === null);
     // The UI never SENDS an actor. `actorOid` exists only as a server-supplied
     // prop used for display comparisons, so assert against the request bodies
     // themselves rather than the whole file.
@@ -93,8 +97,18 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
       localTestIdentity({ NODE_ENV: 'development', WATSON_LOCAL_TEST_OID: 'watson_role_admin' } as unknown as NodeJS.ProcessEnv) === null);
     check('seam cannot be triggered by an email address',
       localTestIdentity({ NODE_ENV: 'development', WATSON_LOCAL_TEST_OID: 'c.hattaway@hrelectriccompany.com' } as unknown as NodeJS.ProcessEnv) === null);
-    check('platform principal takes precedence over the seam',
-      trustedIdentityFromHeaders(principalHeader(ADMIN))?.oid === ADMIN);
+    check('platform principal is used when the seam is not configured',
+      trustedIdentityFromHeaders(principalHeader(ADMIN), {} as NodeJS.ProcessEnv)?.oid === ADMIN);
+    // 021C-1A: on a developer machine nothing sits in front of the app to strip
+    // `x-ms-client-principal`, so a browser CAN send one. When the seam is
+    // configured it must therefore win — the local actor is chosen by server
+    // configuration, never by a request header.
+    check('browser-supplied principal cannot override the configured local seam',
+      trustedIdentityFromHeaders(principalHeader(ADMIN),
+        { NODE_ENV: 'development', WATSON_LOCAL_TEST_OID: OK } as unknown as NodeJS.ProcessEnv)?.oid === OK);
+    check('in production the platform principal still wins over any seam configuration',
+      trustedIdentityFromHeaders(principalHeader(ADMIN),
+        { NODE_ENV: 'production', WATSON_LOCAL_TEST_OID: OK } as unknown as NodeJS.ProcessEnv)?.oid === ADMIN);
     const httpSrc = readFileSync('src/lib/it-agent/rbac/http.ts', 'utf8');
     check('seam reads configuration only, never a request value',
       /WATSON_LOCAL_TEST_OID/.test(httpSrc) && !/x-watson-role|searchParams/i.test(httpSrc));
@@ -104,7 +118,12 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
   console.log('\n[93] RBAC UI — authorization presentation');
   {
     world();
-    check('page performs a server-side authorization check', /actorHasCapability/.test(page));
+    // 021C-1A: the check moved into the shared entry point so the page and the
+    // RBAC routes provably run the same sequence. It is still server-side and
+    // still runs before anything renders.
+    check('page performs a server-side authorization check', /authorizeRbacEntry\(/.test(page));
+    check('the shared entry point is what performs the capability check',
+      /actorHasCapability\(actor, capability\)/.test(readFileSync('src/lib/it-agent/rbac/entry.ts', 'utf8')));
     check('page states the UI is not the boundary', /NOT the security boundary/i.test(page));
     check('unauthorized page renders a refusal, not the admin shell', /do not have permission to administer Watson roles/.test(page));
     check('unauthorized actor is refused by the service too', readRegistry(idOf(EMP)).ok === false);
