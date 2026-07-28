@@ -39,7 +39,10 @@ Azure platform configuration.
 
 - `WATSON_AUTH_MODE=entra`, `WATSON_ADMIN_APP_ROLE=Watson.Admin`
 - `IT_AGENT_GRAPH_LIVE_READONLY=false`, `IT_AGENT_LIVE_EXTERNAL_EXECUTION=false`
-- No Graph/Key Vault app settings; no live remediation; no monitoring; no `NEXT_PUBLIC_*`.
+- No live remediation; no monitoring; no `NEXT_PUBLIC_*`.
+- Graph/Key Vault app settings were **absent at 010C**; they were added later by
+  **011A** (`docs/GRAPH_PREREQUISITES_011A.md`) as prerequisites only. Both safety
+  flags above remain `false` and the connector still resolves to **mock**.
 - `IT_AGENT_PERSIST=off` (read-only package mount; mock cases are in-memory).
 
 ## Verified
