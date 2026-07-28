@@ -39,6 +39,7 @@ import { runEmployeeBluebeamTests } from './employee-bluebeam-012.selftest';
 import { runBluebeamIntegrationTests } from './bluebeam-integration-013.selftest';
 import { runBluebeamAdversarialTests, runHealthProvenanceTests } from './bluebeam-adversarial-014.selftest';
 import { runCaseFamilyIntegrityTests } from './case-family-integrity-017.selftest';
+import { runRbacSecurityCoreTests } from './rbac-security-core-021a.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -230,6 +231,9 @@ async function main() {
 
   const familyIntegrity = await runCaseFamilyIntegrityTests();
   pass += familyIntegrity.pass; fail += familyIntegrity.fail; failures.push(...familyIntegrity.failures);
+
+  const rbacCore = await runRbacSecurityCoreTests();
+  pass += rbacCore.pass; fail += rbacCore.fail; failures.push(...rbacCore.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {
