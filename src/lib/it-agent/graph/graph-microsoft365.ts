@@ -104,8 +104,14 @@ export function createGraphConnector(config: GraphConfig, http: GraphHttpClient,
   if (!config.liveReadOnlyEnabled) {
     throw new Error('MsGraphConnector blocked: live read-only gate (IT_AGENT_GRAPH_LIVE_READONLY) is disabled.');
   }
-  if (!config.tenantId || !config.clientId || !config.clientSecretRef) {
-    throw new Error('MsGraphConnector blocked: required Graph config (tenantId, clientId, clientSecretRef) is incomplete.');
+  // Under managed identity the platform supplies the credential, so tenant id,
+  // client id, and a secret reference are meaningless — requiring them would be
+  // a false check. The credential itself is validated upstream (token acquired
+  // AND required app roles present) before this connector is ever constructed.
+  if (config.credentialModel !== 'managed_identity') {
+    if (!config.tenantId || !config.clientId || !config.clientSecretRef) {
+      throw new Error('MsGraphConnector blocked: required Graph config (tenantId, clientId, clientSecretRef) is incomplete.');
+    }
   }
 
   const sleep = deps.sleep ?? realSleep;

@@ -111,3 +111,71 @@ After 011B validation:
 3. No confirmation that candidate users have MFA registered and licenses assigned.
 4. Exchange application access policy not created (requires Exchange Online
    PowerShell; prohibited in 011A).
+
+---
+
+# 011B update — Phase 7
+
+## 9. What 011B established
+
+Aggregate tenant facts (no employee identity read or exposed):
+
+| Fact | Value |
+|---|---|
+| Licensed **and** enabled member accounts | **13** |
+| Microsoft 365 Business Premium (`SPB`) seats | 5 enabled / 5 consumed — **0 free** |
+| `O365_BUSINESS_PREMIUM` seats | 5 / 5 — **0 free** |
+| `EXCHANGESTANDARD` seats | 3 / 3 — **0 free** |
+
+> **Consequence: T1 must be an existing licensed employee.** Every paid seat is
+> consumed, so provisioning a fresh test account would require **purchasing a
+> licence** — a cost decision that is not authorized. Do not create an unlicensed
+> account either: `check_license_status` and `check_mailbox_status` would return
+> empty, making the pilot unrepresentative.
+
+Per-user enumeration was **refused by the automation environment**, so candidate
+selection is an owner step. It was not worked around.
+
+## 10. Exact owner selection steps (portal, ~3 minutes)
+
+1. **Entra admin centre → Users → All users**. Add the **Licenses** column.
+2. Filter to licensed, enabled accounts. Exclude `info@hrelectriccompany.com`
+   (shared — see §2).
+3. For each candidate, open **Assigned roles** and confirm it is **empty**. Any
+   directory role — Global Administrator especially — disqualifies the account.
+4. Confirm the account is **not** assigned the `Watson.Admin` app role:
+   **Enterprise applications → Watson Non-Production → Users and groups**.
+5. Open **Authentication methods** and confirm at least one method is registered,
+   so `check_mfa_status` returns a non-empty result.
+6. Confirm **Groups** shows at least one membership, so `check_group_membership`
+   is meaningful.
+7. Pick **two** such accounts:
+   - **T1** — the pilot subject.
+   - **T4** — a second ordinary employee, used *only* as a refusal target to
+     prove cross-user isolation. T4 is never diagnosed.
+8. Record both **only** in the deployment record, by alias (`T1`, `T4`).
+
+**Do not**, at any step: create an account, assign or purchase a licence, reset a
+password, change MFA, or alter any directory role.
+
+## 11. Why T4 is not optional
+
+The Graph credential is app-only and can read every user in the tenant. The only
+thing preventing an employee from pulling a colleague's evidence is Watson's own
+policy layer. Without a second real account, 011C can demonstrate that reads
+*work* but not that they are *contained* — and containment is the property that
+actually matters. The refusal path is covered by deterministic tests in
+`scripts/graph-managed-identity.selftest.ts` section `[54]`; T4 confirms it end
+to end against a real directory.
+
+## 12. Optional device user
+
+A managed-Windows or managed-iPad user is **not needed for 011C**. Watson has no
+Intune diagnostic implemented, and no device-management permission is granted or
+requested. Defer until a device diagnostic exists.
+
+## 13. Remaining gaps after 011B
+
+1. T1 and T4 still unidentified (owner step, §10).
+2. MFA registration and group membership unconfirmed for any candidate.
+3. Exchange scoping decision outstanding — see `docs/EXCHANGE_MAILBOX_SCOPING_011B.md` §7.

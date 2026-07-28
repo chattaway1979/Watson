@@ -33,6 +33,7 @@ import { runWatsonEmployeeTests } from './watson-employee.selftest';
 import { runDeploymentPilotTests } from './deployment-pilot.selftest';
 import { runPilotFixTests } from './pilot-fixes.selftest';
 import { runGraphPrereqPostureTests } from './graph-prereq-posture.selftest';
+import { runGraphManagedIdentityTests } from './graph-managed-identity.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -203,6 +204,9 @@ async function main() {
 
   const prereqPosture = await runGraphPrereqPostureTests();
   pass += prereqPosture.pass; fail += prereqPosture.fail; failures.push(...prereqPosture.failures);
+
+  const miGraph = await runGraphManagedIdentityTests();
+  pass += miGraph.pass; fail += miGraph.fail; failures.push(...miGraph.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {

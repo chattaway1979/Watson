@@ -10,6 +10,13 @@
 // in tests). All paths fail closed when config/secret is missing.
 // ============================================================
 
+// Which credential authenticates to Graph. 'client_credentials' is the legacy
+// model (tenant + client id + a Key Vault secret reference). 'managed_identity'
+// is the production model as of 011B: the App Service platform identity IS the
+// credential, so none of those fields carry meaning. Absent => legacy, so every
+// existing caller keeps its original, stricter validation.
+export type GraphCredentialModel = 'client_credentials' | 'managed_identity';
+
 export interface GraphConfig {
   tenantId: string;
   clientId: string;
@@ -18,6 +25,7 @@ export interface GraphConfig {
   keyVaultUrl: string;
   graphBaseUrl: string;
   liveReadOnlyEnabled: boolean;
+  credentialModel?: GraphCredentialModel;
 }
 
 // Abstracts WHERE the Graph client secret/cert comes from.
@@ -149,6 +157,24 @@ export function loadGraphConfig(env: NodeJS.ProcessEnv = process.env): GraphConf
   const liveReadOnlyEnabled = isGraphLiveReadOnlyEnabled(env);
   if (!tenantId || !clientId || !clientSecretRef) return null;
   return { tenantId, clientId, clientSecretRef, keyVaultUrl, graphBaseUrl, liveReadOnlyEnabled };
+}
+
+// Managed-identity Graph config (011B). Under the managed-identity model the
+// PLATFORM IDENTITY is the credential, so there is no client id, no secret
+// reference, and no vault to configure — only the Graph endpoint and the gate.
+// Returned unconditionally (never null): there is no configuration that can be
+// "incomplete", which is precisely why this model removes a whole class of
+// misconfiguration.
+export function loadManagedIdentityGraphConfig(env: NodeJS.ProcessEnv = process.env): GraphConfig {
+  return {
+    tenantId: '',
+    clientId: '',
+    clientSecretRef: '',
+    keyVaultUrl: '',
+    graphBaseUrl: env.GRAPH_BASE_URL?.trim() || 'https://graph.microsoft.com/v1.0',
+    liveReadOnlyEnabled: isGraphLiveReadOnlyEnabled(env),
+    credentialModel: 'managed_identity'
+  };
 }
 
 // HTTP abstraction so tests inject a fake client (no network whatsoever).

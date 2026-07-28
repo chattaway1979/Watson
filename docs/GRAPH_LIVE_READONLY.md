@@ -1,5 +1,13 @@
 # Watson — Live Read-Only Microsoft Graph (Operator Runbook)
 
+> **SUPERSEDED IN PART BY 011B.** Watson's Graph credential is now the App
+> Service **system-assigned managed identity**. There is no client secret, no
+> certificate, and no Key Vault dependency. Sections 1, 4, 6 (secret/vault
+> variables) and 8 below describe the retired client-credentials model and are
+> kept only for history. For the current model, permission set, and readiness
+> states see **`docs/GRAPH_MANAGED_IDENTITY_011B.md`**. Sections 9–12
+> (fail-closed behavior, rollback, no-writes) remain accurate.
+
 Watson's Microsoft 365 diagnostics are **read-only** and run against a **mock
 connector by default**. Live Microsoft Graph reads are possible only when an
 operator deliberately completes every item in the gate below. This document is
