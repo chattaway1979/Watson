@@ -9,6 +9,8 @@
 // ============================================================
 import type { Platform, ScenarioKey, Reversibility, ApprovalLevel, TimeEstimate } from './cases';
 
+import { BLUEBEAM_SCENARIO_DEFS, classifyBluebeamScenarioKey } from './bluebeam-bridge';
+
 export type CheckKind = 'account' | 'm365_service' | 'this_device' | 'signin' | 'service_health';
 export interface CheckSpec {
   label: string;                 // employee-safe, e.g. "Checking your account"
@@ -164,7 +166,7 @@ export const SIMULATED_ACTIONS: Record<string, SimulatedActionDef> = {
 // ------------------------------------------------------------
 // Scenario catalog.
 // ------------------------------------------------------------
-export const SCENARIOS: Record<ScenarioKey, ScenarioDef> = {
+const BASE_SCENARIOS: Record<string, ScenarioDef> = {
   outlook_repeated_signin: {
     key: 'outlook_repeated_signin',
     label: 'Outlook keeps asking to sign in',
@@ -294,9 +296,21 @@ export const SCENARIOS: Record<ScenarioKey, ScenarioDef> = {
 // Deterministic classification. Corrections are handled by the engine (it
 // re-classifies the combined statement + latest message).
 // ------------------------------------------------------------
+// Bluebeam families are merged in from the skill pack so there is exactly one
+// source of truth for them. Adding them here is what makes the pack reachable
+// from ordinary employee language.
+export const SCENARIOS: Record<ScenarioKey, ScenarioDef> = {
+  ...BASE_SCENARIOS,
+  ...BLUEBEAM_SCENARIO_DEFS
+} as Record<ScenarioKey, ScenarioDef>;
+
 export function classifyScenario(text: string): ScenarioKey {
   const t = text.toLowerCase();
   const has = (...ws: string[]) => ws.some((w) => t.includes(w));
+  // Bluebeam FIRST. Without this, "Bluebeam is slow" matches the generic `slow`
+  // rule below and is misdiagnosed as a Windows storage problem.
+  const bb = classifyBluebeamScenarioKey(text);
+  if (bb) return bb as ScenarioKey;
   if (has('lost', 'stolen', 'misplaced', "can't find my laptop", 'left my laptop', 'left my phone')) return 'lost_device';
   if (has('outlook') && has('sign in', 'sign-in', 'signin', 'log in', 'login', 'password prompt', 'keeps asking')) return 'outlook_repeated_signin';
   if (has('sharepoint', 'share point', 'project file', 'project folder', 'site access', 'access denied to')) return 'sharepoint_access';

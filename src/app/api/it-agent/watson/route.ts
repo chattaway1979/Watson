@@ -65,7 +65,14 @@ export async function POST(req: Request) {
       if (!text) return fail('Message is empty.', 400);
       if (text.length > 4000) return fail('Message is too long.', 400);
       const turn = await addEmployeeMessage(actor, caseId, text);
-      return turn ? ok(toEmployeeView(turn.case), NO_STORE) : fail('Case not found.', 404);
+      if (!turn) return fail('Case not found.', 404);
+      // The prior case is finished and immutable, so this message opens a NEW
+      // case rather than appending to a resolved transcript.
+      if (turn.requiresNewCase) {
+        const fresh = await startCase(actor, text, { platform: platformOf(body.platform) });
+        return ok(toEmployeeView(fresh.case), NO_STORE);
+      }
+      return ok(toEmployeeView(turn.case), NO_STORE);
     }
     if (action === 'technician') {
       const turn = await addEmployeeMessage(actor, caseId, 'I would like a technician please.');

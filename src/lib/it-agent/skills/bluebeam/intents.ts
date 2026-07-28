@@ -11,9 +11,18 @@ import { BLUEBEAM_FAMILIES, type BluebeamFamilyKey, type BluebeamFamily, type Di
 // Does this statement concern Bluebeam at all?
 export function isBluebeamIntent(text: string): boolean {
   const t = (text ?? '').toLowerCase();
-  return /\b(bluebeam|revu|blue beam)\b/.test(t) ||
-    // Domain cues that only occur in the plan-markup workflow.
-    /\b(tool chest|toolchest|studio session|studio project|slip.?sheet|takeoff|take.?off)\b/.test(t);
+  if (/\b(bluebeam|revu|blue beam)\b/.test(t)) return true;
+  // Domain cues from the plan-markup workflow. Employees rarely name the
+  // product — they say "my measurements are wrong" or "my tools disappeared" —
+  // so intent must recognise the vocabulary, not only the brand. Competing
+  // systems are excluded separately by the caller's NOT_BLUEBEAM guard.
+  return /\b(tool ?chest|tool ?set|studio session|studio project|slip.?sheet|takeoff|take.?off)\b/.test(t) ||
+    /\b(markups?|calibrate|calibration|measurement|measurements|scale)\b/.test(t) ||
+    /\bstudio\b/.test(t) ||
+    /\bmy tools\b/.test(t) ||
+    /\bprofiles?\b.*\b(missing|gone|lost)\b/.test(t) ||
+    /\bpdf\b.*(lock|read.?only)/.test(t) ||
+    /someone else has .*\bopen\b/.test(t);
 }
 
 interface FamilyMatcher {
@@ -33,10 +42,10 @@ const MATCHERS: FamilyMatcher[] = [
   { key: 'studio', any: [/studio/, /\bsession\b/, /checked out/, /check.?out/, /pending change/], weight: 5 },
   { key: 'markups_toolchest', any: [/tool chest/, /toolchest/, /tool ?set/, /markup/, /\bstamp/, /my tools/, /legend/, /custom column/], weight: 5 },
   { key: 'ocr_search_overlay', any: [/\bocr\b/, /text search/, /search.*(drawing|sheet|pdf)/, /overlay/, /slip.?sheet/, /hyperlink/, /compare document/], weight: 5 },
-  { key: 'file_sync_locking', any: [/read.?only/, /locked/, /someone else has it/, /conflicting copy/, /sync/, /sharepoint/, /onedrive/, /checked out/], weight: 4 },
+  { key: 'file_sync_locking', any: [/read.?only/, /locked/, /someone else has/, /conflicting copy/, /sync/, /sharepoint/, /onedrive/, /checked out/], weight: 4 },
   { key: 'signin_licensing', any: [/licen[cs]/, /sign.?in/, /log.?in/, /activation/, /entitlement/, /demo mode/, /trial.*expire/, /expired/], weight: 4 },
   { key: 'pdf_rendering', any: [/blank/, /missing (content|linework|text)/, /wont open|will not open|won.t open/, /corrupt/, /render/, /font/], weight: 3 },
-  { key: 'profiles_settings', any: [/settings.*(gone|lost|reset)/, /profile.*(gone|lost|corrupt|missing)/, /workspace.*(gone|reset)/, /forgotten.*settings/], weight: 4 },
+  { key: 'profiles_settings', any: [/settings.*(gone|lost|reset|chang)/, /profiles?.*(gone|lost|corrupt|missing)/, /workspace.*(gone|reset)/, /forgotten.*settings/], weight: 6 },
   { key: 'launch_stability', any: [/(will not|won.t|wont|cannot|can.t) open/, /crash/, /freez/, /not responding/, /unresponsive/, /slow/, /hang/, /lock(ed)? up/], weight: 3 }
 ];
 

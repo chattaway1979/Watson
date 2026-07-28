@@ -32,6 +32,19 @@ export type ScenarioKey =
   | 'onedrive_sync'
   | 'device_slow_storage'
   | 'lost_device'
+  // Bluebeam families (013). These mirror the ten skill-pack family keys 1:1 —
+  // registry entries, not new families. Enumerated literally rather than
+  // imported so cases.ts stays free of a cycle back to the bridge.
+  | 'bluebeam_launch_stability'
+  | 'bluebeam_signin_licensing'
+  | 'bluebeam_studio'
+  | 'bluebeam_pdf_rendering'
+  | 'bluebeam_printing_plotting'
+  | 'bluebeam_measurement_scale'
+  | 'bluebeam_markups_toolchest'
+  | 'bluebeam_ocr_search_overlay'
+  | 'bluebeam_file_sync_locking'
+  | 'bluebeam_profiles_settings'
   | 'unknown';
 
 export type EvidenceStrength =

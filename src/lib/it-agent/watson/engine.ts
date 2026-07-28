@@ -15,6 +15,13 @@ import type { Actor } from '../types';
 import { runM365Diagnostic } from '../graph/graph-diagnostics';
 import { isGraphLiveReadOnlyEnabled } from '../graph/graph-config';
 import { ensureMockIdentity } from '../seed-knowledge';
+import {
+  isBluebeamScenarioKey, familyKeyForScenario, nextBluebeamQuestion,
+  interpretBluebeamAnswer, assessBluebeam, bluebeamRepairActionKey,
+  detectImpactSignals, priorityFromImpact, confidenceWording
+} from './bluebeam-bridge';
+import { bluebeamFamily } from '../skills/bluebeam/families';
+import { causeProfile } from '../support/causes';
 import { mockDevice } from '../mock-device-management';
 import {
   SCENARIOS, SIMULATED_ACTIONS, classifyScenario, detectPlatform, estimateFor, UNKNOWN_ESTIMATE,
@@ -36,6 +43,10 @@ export interface WatsonTurn {
   reply: string;          // plain-language Watson message (also spoken via seam)
   followupQuestion?: string;
   needsApproval?: boolean;
+  // Set when the employee typed into a case that is already finished. The
+  // caller must open a NEW case rather than appending, which is what previously
+  // caused "Thank you — noted." to land on a resolved transcript.
+  requiresNewCase?: boolean;
 }
 
 function watsonSay(c: WatsonCase, text: string): void {
@@ -263,6 +274,11 @@ async function investigate(actor: Actor, c: WatsonCase): Promise<WatsonTurn> {
   c.state = 'investigating';
   c.needs = []; // recomputed below; cleared so a resolved follow-up is not re-asked
 
+  // Bluebeam families run the skill pack's own evidence tree. They reuse this
+  // engine's authorization, approval, audit, resume, verification and handoff —
+  // only the diagnostic content differs.
+  if (isBluebeamScenarioKey(scenario)) return investigateBluebeam(actor, c, def);
+
   // Auto-escalation scenarios (lost device -> security; unknown -> general).
   if (def.autoEscalate) {
     c.businessImpact = def.autoEscalate === 'security' ? 'individual' : c.businessImpact;
@@ -312,10 +328,91 @@ async function investigate(actor: Actor, c: WatsonCase): Promise<WatsonTurn> {
   return { case: c, reply: msg, needsApproval: true };
 }
 
+
+// Bluebeam diagnosis: one evidence question per turn, then an evidence-backed
+// cause. A repair is proposed ONLY when the cause is repairable AND the evidence
+// is sufficient; every other outcome escalates rather than guessing.
+async function investigateBluebeam(actor: Actor, c: WatsonCase, def: ScenarioDef): Promise<WatsonTurn> {
+  const familyKey = familyKeyForScenario(c.scenario);
+  if (!familyKey) { escalate(actor, c, 'unclassified_problem', def); return { case: c, reply: c.messages[c.messages.length - 1].text }; }
+  const family = bluebeamFamily(familyKey);
+
+  // Business impact drives priority. Measurement and file-lock families carry
+  // takeoff/data-loss risk regardless of wording, so priority rises even when
+  // the employee describes the problem calmly.
+  const allText = [c.originalStatement, ...c.messages.filter((m) => m.role === 'employee').map((m) => m.text)].join(' ');
+  const signals = detectImpactSignals(allText, familyKey);
+  c.known.impactSignals = signals;
+  c.priority = priorityFromImpact(signals);
+  c.urgency = c.priority;
+
+  // One question at a time; never re-ask something already recorded.
+  const q = nextBluebeamQuestion(familyKey, c.known);
+  if (q) {
+    c.state = 'waiting_for_employee';
+    c.needs = [q.evidenceKey];
+    auditCase(actor, 'diagnostic_plan_created', c, { needs: q.evidenceKey, remaining: q.remaining });
+    watsonSay(c, q.question);
+    touch(c);
+    return { case: c, reply: q.question, followupQuestion: q.question };
+  }
+
+  const a = assessBluebeam(familyKey, c.known);
+  c.confidence = a.confidence;
+  c.hypotheses = [{
+    key: a.cause,
+    label: causeProfile(a.cause).label,
+    strength: a.sufficient ? 'strongly_indicated' : 'possible',
+    primary: true
+  }];
+  c.evidence = family.branches
+    .filter((b) => typeof c.known[b.evidenceKey] === 'string')
+    .map((b) => ({
+      check: b.question,
+      strength: (a.sufficient ? 'strongly_indicated' : 'possible') as EvidenceItem['strength'],
+      // Employee-safe: the recorded answer only, never a raw payload or path.
+      summary: `You told me: ${String(c.known[b.evidenceKey]).replace(/_/g, ' ')}`
+    }));
+
+  const repairKey = bluebeamRepairActionKey(familyKey, a);
+  if (!repairKey) {
+    // No safe repair. This is a deliberate outcome for most families: the safe
+    // response is a technician with a full record, not a guessed change.
+    auditCase(actor, 'diagnosis_blocked', c, { cause: a.cause, confidence: a.confidence, sufficient: a.sufficient });
+    escalate(actor, c, a.sufficient ? `no_safe_repair_${a.cause}` : 'insufficient_evidence', def);
+    return { case: c, reply: c.messages[c.messages.length - 1].text };
+  }
+
+  const action = SIMULATED_ACTIONS[repairKey];
+  const solution = proposeSolution(def, action);
+  c.proposedSolution = solution;
+  c.estimate = estimateFor(action);
+  c.approval = { required: true, level: action.approvalLevel, state: 'requested' };
+  c.state = 'waiting_for_approval';
+  auditCase(actor, 'diagnosis_proposed', c, { confidence: a.confidence, action: action.key, cause: a.cause });
+  auditCase(actor, 'employee_approval_requested', c, { level: action.approvalLevel });
+  const msg = `${confidenceWording(a)} ${solution.explanation} This is simulated in the current pilot — nothing on your computer is changed. It should take ${c.estimate.label.toLowerCase()} and ${solution.expectedInterruption.toLowerCase()} Would you like me to go ahead?`;
+  watsonSay(c, msg);
+  touch(c);
+  return { case: c, reply: msg, needsApproval: true };
+}
+
 // Employee sends a message (answer to a follow-up, a correction, or a new detail).
 export async function addEmployeeMessage(actor: Actor, caseId: string, text: string): Promise<WatsonTurn | null> {
   const c = getCaseForActor(caseId, actor);
   if (!c) return null;
+
+  // A finished case is IMMUTABLE. Previously any further message appended
+  // "Thank you — noted." to a resolved transcript until reload; a new problem
+  // must open a new case instead.
+  if (c.state === 'resolved' || c.state === 'closed' || c.state === 'escalated') {
+    return {
+      case: c,
+      reply: 'That issue is already finished, so I have started a new one for you.',
+      requiresNewCase: true
+    };
+  }
+
   employeeSay(c, text);
   auditCase(actor, 'employee_message_recorded', c, { role: 'employee' });
 
@@ -339,6 +436,27 @@ export async function addEmployeeMessage(actor: Actor, caseId: string, text: str
   if (c.state === 'waiting_for_employee' && c.needs.includes('platform') && corrected !== 'unknown') {
     c.platform = corrected; c.needs = [];
     return investigate(actor, c);
+  }
+
+  // Bluebeam evidence answer for the exact question just asked.
+  if (c.needs.length > 0 && isBluebeamScenarioKey(c.scenario)) {
+    const familyKey = familyKeyForScenario(c.scenario);
+    const evidenceKey = c.needs[0];
+    if (familyKey) {
+      const value = interpretBluebeamAnswer(familyKey, evidenceKey, text);
+      if (value === null) {
+        // Unrecognised answer: re-ask rather than record a guess as evidence.
+        const again = nextBluebeamQuestion(familyKey, c.known);
+        const q = again ? again.question : 'Could you tell me a little more about what you are seeing?';
+        watsonSay(c, q);
+        touch(c);
+        return { case: c, reply: q, followupQuestion: q };
+      }
+      c.known[evidenceKey] = value;
+      c.needs = [];
+      auditCase(actor, 'employee_message_recorded', c, { evidence: evidenceKey });
+      return investigate(actor, c);
+    }
   }
 
   touch(c);

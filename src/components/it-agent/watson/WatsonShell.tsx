@@ -50,12 +50,23 @@ export function WatsonShell() {
     if (r.ok && r.data.state === 'technician_working') await post('run');
   }
 
+  // A finished case is immutable. Typing after resolution opens a NEW case
+  // rather than appending to the resolved transcript.
+  const isFinished = c?.state === 'resolved' || c?.state === 'closed' || c?.state === 'escalated';
+
   async function send() {
     const t = text.trim();
     if (!t) return;
     setText('');
-    if (!c) await post('start', { text: t });
+    if (!c || isFinished) await post('start', { text: t });
     else await post('message', { text: t });
+  }
+
+  // Explicit "Start a new issue": clears the local case so the composer is
+  // unmistakably starting fresh.
+  function startNewIssue() {
+    setC(null);
+    setText('');
   }
 
   const particleState = caseStateToParticleState(c?.state, { listening, speaking });
@@ -126,6 +137,15 @@ export function WatsonShell() {
         </div>
       ) : null}
 
+      {isFinished ? (
+        <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 p-3 text-sm text-slate-200">
+          <span className="min-w-0 flex-1">This issue is finished. Anything new will open a fresh issue.</span>
+          <button
+            onClick={startNewIssue}
+            className="rounded-lg bg-sky-700 px-3 py-2 text-sm font-medium text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
+          >Start a new issue</button>
+        </div>
+      ) : null}
       {/* Input row: mic (mock push-to-talk), text, screenshot */}
       <div className="flex items-center gap-2">
         <button
