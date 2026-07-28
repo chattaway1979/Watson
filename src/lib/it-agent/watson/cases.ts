@@ -177,6 +177,15 @@ export interface WatsonCase {
   assigned: { queue: string | null; owner: string | null };
   employeeReport: unknown | null;
   adminReport: unknown | null;
+  // Skill-pack notes carried into the technician handoff (014). Without these a
+  // technician receives evidence but not the constraints that protect the
+  // employee's work — e.g. "do not reset the profile before backing up the Tool
+  // Chest", which is the single most important instruction on that case.
+  technicianNotes: {
+    safetyConstraints: string[];
+    stillUnknown: string[];
+    recommendedNextStep: string[];
+  } | null;
   auditRefs: string[];
 
   // What Watson still needs from the employee (drives one-question-at-a-time).
@@ -231,6 +240,7 @@ export function createCase(input: {
     assigned: { queue: null, owner: null },
     employeeReport: null,
     adminReport: null,
+    technicianNotes: null,
     auditRefs: [],
     needs: [],
     known: {}

@@ -240,7 +240,16 @@ function buildAdminReport(c: WatsonCase, def: ScenarioDef) {
     escalation: c.escalation,
     routingCategory: def.routingCategory,
     auditRefs: c.auditRefs,
-    prevention: 'Consider proactive session-refresh reminders for recurring Outlook sign-in prompts.'
+    // Constraints and next steps the technician must see. Absent for scenarios
+    // that do not supply them; never fabricated.
+    safetyConstraints: c.technicianNotes?.safetyConstraints ?? [],
+    stillUnknown: c.technicianNotes?.stillUnknown ?? [],
+    recommendedNextStep: c.technicianNotes?.recommendedNextStep ?? [],
+    // Previously hardcoded to an Outlook sentence, so it appeared on every
+    // handoff including Bluebeam ones. Stated only where it is actually true.
+    prevention: def.key === 'outlook_repeated_signin'
+      ? 'Consider proactive session-refresh reminders for recurring Outlook sign-in prompts.'
+      : null
   };
 }
 
@@ -374,6 +383,17 @@ async function investigateBluebeam(actor: Actor, c: WatsonCase, def: ScenarioDef
       summary: `You told me: ${String(c.known[b.evidenceKey]).replace(/_/g, ' ')}`
     }));
 
+  // Carry the family's constraints into the handoff BEFORE any escalation, so a
+  // technician inherits the rules that protect the employee's work rather than
+  // just the evidence.
+  c.technicianNotes = {
+    safetyConstraints: [...family.prohibitedActions],
+    stillUnknown: family.branches
+      .filter((b) => typeof c.known[b.evidenceKey] !== 'string')
+      .map((b) => b.question),
+    recommendedNextStep: [...family.escalationConditions]
+  };
+
   const repairKey = bluebeamRepairActionKey(familyKey, a);
   if (!repairKey) {
     // No safe repair. This is a deliberate outcome for most families: the safe
@@ -496,6 +516,12 @@ export function runSimulatedRepair(actor: Actor, caseId: string): WatsonTurn | n
   const c = getCaseForActor(caseId, actor);
   if (!c || !c.proposedSolution) return null;
   if (c.approval.state !== 'granted') return { case: c, reply: 'I need your approval before making any change.' };
+  // Replay guard (014): approval stays granted after a run, so a repeated
+  // request would otherwise append a SECOND execution record for one approval.
+  // One approval means one execution.
+  if (c.state !== 'technician_working' || c.runs.some((r) => r.status === 'completed' || r.status === 'started')) {
+    return { case: c, reply: 'I have already run that step — there is nothing further to run.' };
+  }
   const action = SIMULATED_ACTIONS[c.proposedSolution.actionKey];
   const before = { scenario: c.scenario, healthySignals: c.evidence.map((e) => e.strength) };
   const run: SimulatedRun = { actionKey: action.key, startedAt: c.updatedAt, beforeState: before, status: 'started', progressNote: action.steps[0] };
@@ -540,6 +566,10 @@ export function stopSimulatedRepair(actor: Actor, caseId: string): WatsonTurn | 
 export function submitVerification(actor: Actor, caseId: string, choice: 'works' | 'still_broken' | 'partial' | 'unsure'): WatsonTurn | null {
   const c = getCaseForActor(caseId, actor);
   if (!c) return null;
+  // Finality guard (014). Without this an employee could mark an ESCALATED case
+  // resolved — falsifying a technician's queue — or re-open a resolved case.
+  // Verification is only meaningful while the case is awaiting it.
+  if (c.state !== 'waiting_for_verification') return null;
   c.verification.employeeChoice = choice;
   if (choice === 'works') {
     c.verification.functionalVerified = true;
@@ -588,6 +618,8 @@ function investigateSyncFallback(actor: Actor, c: WatsonCase): WatsonTurn {
 export function attachScreenshot(actor: Actor, caseId: string, meta: Omit<AttachmentMeta, 'id' | 'at'>): WatsonCase | null {
   const c = getCaseForActor(caseId, actor);
   if (!c) return null;
+  // Finished cases are immutable (014) — including their evidence.
+  if (c.state === 'resolved' || c.state === 'closed' || c.state === 'escalated') return null;
   c.attachments.push({ ...meta, id: 'att' + c.attachments.length, at: c.updatedAt });
   touch(c);
   return c;

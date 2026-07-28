@@ -11,15 +11,27 @@ import { BLUEBEAM_FAMILIES, type BluebeamFamilyKey, type BluebeamFamily, type Di
 // Does this statement concern Bluebeam at all?
 export function isBluebeamIntent(text: string): boolean {
   const t = (text ?? '').toLowerCase();
+
+  // STRONG cues: the brand, or vocabulary that exists nowhere else in this
+  // business's toolset. These stand on their own.
   if (/\b(bluebeam|revu|blue beam)\b/.test(t)) return true;
-  // Domain cues from the plan-markup workflow. Employees rarely name the
-  // product — they say "my measurements are wrong" or "my tools disappeared" —
-  // so intent must recognise the vocabulary, not only the brand. Competing
-  // systems are excluded separately by the caller's NOT_BLUEBEAM guard.
-  return /\b(tool ?chest|tool ?set|studio session|studio project|slip.?sheet|takeoff|take.?off)\b/.test(t) ||
-    /\b(markups?|calibrate|calibration|measurement|measurements|scale)\b/.test(t) ||
-    /\bstudio\b/.test(t) ||
+  if (/\b(tool ?chest|tool ?set|studio session|studio project|slip.?sheet|takeoff|take.?off|calibrate|calibration)\b/.test(t)) return true;
+
+  // WEAK cues ("markup", "measurement", "scale", "my tools", "studio") are
+  // shared with other software and with physical objects. The 014 adversarial
+  // review captured "the scale on my Excel chart is wrong", "Word document
+  // markup is missing" and "the scale in the warehouse is broken" on these
+  // alone. A weak cue is therefore honoured only when nothing else in the
+  // sentence has a stronger claim to it.
+  const COMPETING_CONTEXT =
+    /\b(excel|word|powerpoint|outlook|teams|sharepoint|onedrive|adobe|acrobat|chrome|edge|firefox|browser|spreadsheet|chart|warehouse|weighing|weigh|bathroom|kitchen|apartment)\b/;
+  if (COMPETING_CONTEXT.test(t)) return false;
+
+  return /\b(markups?|measurements?)\b/.test(t) ||
+    /\bscale\b/.test(t) ||
     /\bmy tools\b/.test(t) ||
+    // "Studio" only where it is used the way Bluebeam Studio is used.
+    /\bstudio\b.*\b(connect|session|project|join|sign|sync|upload)\b/.test(t) ||
     /\bprofiles?\b.*\b(missing|gone|lost)\b/.test(t) ||
     /\bpdf\b.*(lock|read.?only)/.test(t) ||
     /someone else has .*\bopen\b/.test(t);

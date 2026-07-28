@@ -78,7 +78,12 @@ function toScenarioDef(f: BluebeamFamily): ScenarioDef {
       .filter((c) => c !== 'unknown_cause')
       .map((c) => ({ key: c, label: c })),
     repairActionKey: REPAIR_ACTION_BY_FAMILY[f.key],
-    employeeExplanation: f.label,
+    // Deliberately NOT set to the family label. proposeSolution() prepends
+    // employeeExplanation to the action's own wording, so setting it to the
+    // taxonomy label produced sentences like "I am confident about the cause.
+    // Bluebeam will not open, crashes, freezes, or runs slowly Close and reopen
+    // the app..." — an internal label leaking into employee-facing text (014).
+    employeeExplanation: undefined,
     followupNeeds: f.branches.map((b) => b.evidenceKey)
   };
 }

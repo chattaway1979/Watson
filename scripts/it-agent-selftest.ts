@@ -37,6 +37,7 @@ import { runGraphManagedIdentityTests } from './graph-managed-identity.selftest'
 import { runEndpointAgentTests } from './endpoint-agent-012.selftest';
 import { runEmployeeBluebeamTests } from './employee-bluebeam-012.selftest';
 import { runBluebeamIntegrationTests } from './bluebeam-integration-013.selftest';
+import { runBluebeamAdversarialTests } from './bluebeam-adversarial-014.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -219,6 +220,9 @@ async function main() {
 
   const bbIntegration = await runBluebeamIntegrationTests();
   pass += bbIntegration.pass; fail += bbIntegration.fail; failures.push(...bbIntegration.failures);
+
+  const bbAdversarial = await runBluebeamAdversarialTests();
+  pass += bbAdversarial.pass; fail += bbAdversarial.fail; failures.push(...bbAdversarial.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {
