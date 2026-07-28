@@ -33,9 +33,39 @@ interface Principal { claims?: PrincipalClaim[] }
 
 // Returns null when the platform did not supply a usable principal. Absence is
 // an authentication failure, never a fallback to a header or cookie.
+// ------------------------------------------------------------
+// LOCAL TEST SEAM (021C Part 1).
+//
+// Easy Auth does not exist on a developer machine, so the administrator UI
+// cannot be exercised in a browser without a principal. This seam supplies a
+// SYNTHETIC one, and it is deliberately hard to turn on by accident:
+//
+//   * it is ignored entirely when NODE_ENV === 'production';
+//   * it requires an explicit WATSON_LOCAL_TEST_OID env var — there is no
+//     default, no first-user-wins, and no request input that can reach it;
+//   * the value must still be a well-formed object id, so it cannot widen what
+//     counts as an identity;
+//   * a request header, cookie or query parameter can never trigger it.
+//
+// Tests assert it is inert in production. It exists so local browser validation
+// does not require weakening the real authentication path.
+// ------------------------------------------------------------
+export function localTestIdentity(env: NodeJS.ProcessEnv = process.env): TrustedIdentity | null {
+  if (env.NODE_ENV === 'production') return null;
+  const oid = env.WATSON_LOCAL_TEST_OID?.trim();
+  if (!oid) return null;
+  return resolveTrustedIdentity({
+    oid,
+    upn: env.WATSON_LOCAL_TEST_UPN?.trim() || 'local.test@staged.invalid',
+    displayName: env.WATSON_LOCAL_TEST_NAME?.trim() || 'Local Test Administrator'
+  });
+}
+
 export function trustedIdentityFromHeaders(headers: HeaderBag): TrustedIdentity | null {
   const raw = headers.get('x-ms-client-principal');
-  if (!raw) return null;
+  // The platform principal always wins. The local seam is only consulted when
+  // the platform supplied nothing, and never in production.
+  if (!raw) return localTestIdentity();
   let principal: Principal;
   try {
     principal = JSON.parse(Buffer.from(raw, 'base64').toString('utf8')) as Principal;

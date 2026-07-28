@@ -3,7 +3,7 @@
  * Deterministic; no network, no Graph, no tenant write.
  * ============================================================ */
 import { readFileSync } from 'node:fs';
-import { trustedIdentityFromHeaders, statusFor, messageFor } from '../src/lib/it-agent/rbac/http';
+import { trustedIdentityFromHeaders, statusFor, messageFor, localTestIdentity } from '../src/lib/it-agent/rbac/http';
 import { STAGED_DIRECTORY } from '../src/lib/it-agent/rbac/directory';
 import { WATSON_ROLES, WATSON_ROLE_KEYS } from '../src/lib/it-agent/rbac/roles';
 import {
@@ -77,6 +77,28 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
       const m = messageFor(r as never); return !/stack|sql|exception|at Object|undefined/i.test(m.message + m.nextAction);
     }));
     check('every refusal carries a next action', ['unauthenticated', 'not_authorized', 'last_admin_protected', 'stale_preview', 'replayed_preview', 'elevated_ack_required'].every((r) => messageFor(r as never).nextAction.length > 8));
+  }
+
+  console.log('\n[98] RBAC — local test seam is inert in production (021C)');
+  {
+    const OK = '00000000-0000-4000-8000-000000000099';
+    // The seam must be OFF unless explicitly configured, and OFF in production
+    // no matter what is configured.
+    check('seam off with no configuration', localTestIdentity({} as NodeJS.ProcessEnv) === null);
+    check('seam OFF in production even when configured',
+      localTestIdentity({ NODE_ENV: 'production', WATSON_LOCAL_TEST_OID: OK } as unknown as NodeJS.ProcessEnv) === null);
+    check('seam on in development when explicitly configured',
+      localTestIdentity({ NODE_ENV: 'development', WATSON_LOCAL_TEST_OID: OK } as unknown as NodeJS.ProcessEnv)?.oid === OK);
+    check('seam still requires a well-formed object id',
+      localTestIdentity({ NODE_ENV: 'development', WATSON_LOCAL_TEST_OID: 'watson_role_admin' } as unknown as NodeJS.ProcessEnv) === null);
+    check('seam cannot be triggered by an email address',
+      localTestIdentity({ NODE_ENV: 'development', WATSON_LOCAL_TEST_OID: 'c.hattaway@hrelectriccompany.com' } as unknown as NodeJS.ProcessEnv) === null);
+    check('platform principal takes precedence over the seam',
+      trustedIdentityFromHeaders(principalHeader(ADMIN))?.oid === ADMIN);
+    const httpSrc = readFileSync('src/lib/it-agent/rbac/http.ts', 'utf8');
+    check('seam reads configuration only, never a request value',
+      /WATSON_LOCAL_TEST_OID/.test(httpSrc) && !/x-watson-role|searchParams/i.test(httpSrc));
+    check('seam documented as production-inert', /ignored entirely when NODE_ENV/.test(httpSrc));
   }
 
   console.log('\n[93] RBAC UI — authorization presentation');
