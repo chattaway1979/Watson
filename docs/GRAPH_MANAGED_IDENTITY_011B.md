@@ -8,6 +8,12 @@ proposed in 011A.
 
 Contains no tenant, subscription, client, object, or principal identifiers.
 
+> **Amended by 011C.** `MailboxSettings.Read` was **removed** from the managed
+> identity (Exchange Option C), so the approved set is now **two** roles:
+> `User.Read.All` and `UserAuthenticationMethod.Read.All`. `check_mailbox_status`
+> is unavailable by design. The obsolete `GRAPH-APP` registration referenced in
+> §2 and §7 has been **deleted**. See `docs/GRAPH_LIVE_PILOT_011C.md`.
+
 > **Live Graph reads remain DISABLED.** `IT_AGENT_GRAPH_LIVE_READONLY=false` and
 > `IT_AGENT_LIVE_EXTERNAL_EXECUTION=false`. No employee or workload Graph data
 > was queried by this task. 011C is **not** enabled.

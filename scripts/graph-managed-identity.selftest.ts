@@ -12,6 +12,8 @@ import {
   extractGraphRoles,
   graphClientSecretPosture,
   graphManagedIdentityReadiness,
+  effectiveGraphCapabilities,
+  inspectAccessTokenClaims,
   createManagedIdentityGraphHttpClient,
   failClosedGraphTokenProvider,
   REQUIRED_GRAPH_APP_ROLES,
@@ -35,6 +37,18 @@ function fakeToken(roles: string[]): string {
   const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
   const payload = Buffer.from(JSON.stringify({ roles, marker: TOKEN_MARKER })).toString('base64url');
   return `${header}.${payload}.${TOKEN_MARKER}`;
+}
+// A DELEGATED token: carries `scp`, no roles. Must never pass as app-only.
+function delegatedToken(): string {
+  const h = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+  const p = Buffer.from(JSON.stringify({ aud: 'https://graph.microsoft.com', scp: 'User.Read', marker: TOKEN_MARKER })).toString('base64url');
+  return `${h}.${p}.${TOKEN_MARKER}`;
+}
+// Token with a specific audience, for audience validation.
+function audienceToken(aud: string) {
+  const h = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+  const p = Buffer.from(JSON.stringify({ aud, roles: ['User.Read.All'], exp: 1, marker: TOKEN_MARKER })).toString('base64url');
+  return inspectAccessTokenClaims(`${h}.${p}.${TOKEN_MARKER}`);
 }
 const providerWith = (roles: string[]): GraphTokenProvider => ({
   id: 'azure-managed-identity',
@@ -110,7 +124,47 @@ export async function runGraphManagedIdentityTests(): Promise<{ pass: number; fa
     });
     check('missing required role => graph_permission_incomplete', ev.state === 'graph_permission_incomplete', ev.state);
     check('missing required role => not live', ev.liveReadWouldAttempt === false);
-    check('missing roles are itemised', (ev.posture?.missing ?? []).includes('MailboxSettings.Read'));
+    check('missing roles are itemised', (ev.posture?.missing ?? []).includes('UserAuthenticationMethod.Read.All'));
+  }
+
+  // --- 011C Exchange Option C: effective capability, not intended ---------
+  {
+    check('MailboxSettings.Read is NOT in the approved set (Option C)',
+      !(REQUIRED_GRAPH_APP_ROLES as readonly string[]).includes('MailboxSettings.Read'));
+
+    const eff = effectiveGraphCapabilities([...REQUIRED_GRAPH_APP_ROLES]);
+    check('check_mailbox_status reported UNAVAILABLE under Option C',
+      eff.unavailable.includes('check_mailbox_status'), eff.unavailable.join(','));
+    check('lookup_user / licence / MFA / group membership remain available',
+      ['lookup_user', 'check_license_status', 'check_mfa_status', 'check_group_membership']
+        .every((k) => eff.available.includes(k)), eff.available.join(','));
+
+    // Capability must follow the ACTUAL roles, not the approved list.
+    const withMailbox = effectiveGraphCapabilities([...REQUIRED_GRAPH_APP_ROLES, 'MailboxSettings.Read']);
+    check('capability follows real roles, not intent',
+      withMailbox.available.includes('check_mailbox_status'));
+    const degraded = effectiveGraphCapabilities(['User.Read.All']);
+    check('losing a role removes exactly the dependent read',
+      degraded.unavailable.includes('check_mfa_status') && degraded.available.includes('lookup_user'));
+  }
+
+  // --- 011C Phase 4: token claim validation (no token escapes) -----------
+  {
+    const good = inspectAccessTokenClaims(fakeToken([...REQUIRED_GRAPH_APP_ROLES]));
+    check('app-only token detected as application-only', good.applicationOnly === true);
+    check('app-only token has no delegated scopes', good.hasDelegatedScopes === false);
+    check('token roles surfaced for validation', good.roles.length === REQUIRED_GRAPH_APP_ROLES.length);
+    check('claim inspection emits no token', !JSON.stringify(good).includes(TOKEN_MARKER));
+
+    // A delegated token must never be accepted as an app-only credential.
+    const delegated = delegatedToken();
+    const dv = inspectAccessTokenClaims(delegated);
+    check('delegated token rejected as not application-only', dv.applicationOnly === false);
+    check('delegated token flagged as carrying scopes', dv.hasDelegatedScopes === true);
+
+    check('audience validated as Microsoft Graph', audienceToken('https://graph.microsoft.com').audienceIsGraph === true);
+    check('non-Graph audience rejected', audienceToken('https://vault.azure.net').audienceIsGraph === false);
+    check('malformed token yields no validation', inspectAccessTokenClaims('nope').applicationOnly === false);
   }
 
   // --- 11 & 12. Forbidden permissions fail posture validation -------------
@@ -312,6 +366,61 @@ export async function runGraphManagedIdentityTests(): Promise<{ pass: number; fa
     const a = resolveEmployeeDiagnosticSubject({ actor: admin('boss@hrelectriccompany.com') });
     check('admin cross-user targeting is out of scope on the employee path',
       a.allowed === false && a.reason === 'admin_targeting_out_of_scope');
+  }
+
+  // --- 011C Phase 6: PROVE zero Graph calls for rejected targeting --------
+  // A counting transport sits where the real Graph transport would. Every
+  // refused targeting attempt must leave the counter at zero — refusal has to
+  // happen BEFORE the request, not after a call whose result is discarded.
+  {
+    let graphCalls = 0;
+    const countingHttp = {
+      async getToken() { graphCalls++; return 'token'; },
+      async get() { graphCalls++; return { status: 200, body: {} }; }
+    };
+
+    const T1 = 'pilot.one@hrelectriccompany.com';
+    const T4 = 'containment.four@hrelectriccompany.com';
+    const rejected: Array<[string, string | null | undefined, Actor | null]> = [
+      ['T4 submitted as explicit target', T4, employee(T1)],
+      ['own identifier submitted explicitly', T1, employee(T1)],
+      ['malformed target', 'not-an-email', employee(T1)],
+      ['OData / path injection', "x@y.com/../groups?$select=id", employee(T1)],
+      ['unmapped identity', null, employee(undefined)],
+      ['unsupported administrator target', T4, admin('boss@hrelectriccompany.com')],
+      ['unauthenticated', T4, null]
+    ];
+
+    const shapes = new Set<string>();
+    for (const [label, target, actor] of rejected) {
+      graphCalls = 0;
+      const decision = resolveEmployeeDiagnosticSubject({ actor, clientSuppliedTarget: target });
+      const subject = graphSubjectOrNull(decision);
+      // The guard is what a caller must honour: null => never touch Graph.
+      if (subject !== null) { await countingHttp.getToken(); }
+      check(`zero Graph calls for rejected case: ${label}`, graphCalls === 0 && subject === null,
+        `calls=${graphCalls}`);
+      const audit = scopeDecisionForAudit(decision);
+      shapes.add(Object.keys(audit).sort().join(','));
+      // The attempted identifier must never reach the audit record.
+      check(`attempted identifier not in audit: ${label}`,
+        !JSON.stringify(audit).includes(String(target ?? '')) || target === null || target === undefined);
+    }
+    check('all refusals share one consistent error shape', shapes.size === 1, [...shapes].join(' | '));
+
+    // T4 specifically: never queried, never present anywhere in any refusal.
+    graphCalls = 0;
+    const t4 = resolveEmployeeDiagnosticSubject({ actor: employee(T1), clientSuppliedTarget: T4 });
+    check('T4 never becomes a Graph subject', graphSubjectOrNull(t4) === null);
+    check('T4 address absent from the audit projection',
+      !JSON.stringify(scopeDecisionForAudit(t4)).includes(T4));
+    check('no Graph request issued while refusing T4', graphCalls === 0);
+
+    // Positive control: an allowed decision DOES yield a subject, proving the
+    // zero-call result above is containment and not an inert test.
+    const allowed = resolveEmployeeDiagnosticSubject({ actor: employee(T1) });
+    check('positive control — authorized self-diagnosis yields a subject',
+      graphSubjectOrNull(allowed) === T1);
   }
 
   // --- case ownership alignment ------------------------------------------

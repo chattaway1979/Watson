@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 # ============================================================
-# Watson — WATSON-GRAPH-PREREQUISITES-PROVISION-011A
+# ██ DEPRECATED — DO NOT RUN ██  (superseded by 011B/011C)
+# ------------------------------------------------------------
+# This script provisions the CLIENT-CREDENTIALS model: an app registration, a
+# client secret, and a Key Vault. Watson no longer uses any of that. The Graph
+# credential is now the App Service SYSTEM-ASSIGNED MANAGED IDENTITY.
+#
+# The app registration this script creates was DELETED in 011C. Running it would
+# recreate an unused identity and re-consent tenant-wide Graph permissions to it,
+# undoing a deliberate privilege reduction. It therefore refuses to run.
+#
+# Kept for historical reference only. See:
+#   docs/GRAPH_MANAGED_IDENTITY_011B.md   — current credential model
+#   docs/GRAPH_LIVE_PILOT_011C.md         — cleanup + pilot record
+# ============================================================
+echo "REFUSING TO RUN: this script provisions the retired client-credentials model." >&2
+echo "Watson uses the App Service managed identity. See docs/GRAPH_MANAGED_IDENTITY_011B.md" >&2
+exit 1
+
+# ============================================================
+# Watson — WATSON-GRAPH-PREREQUISITES-PROVISION-011A  (historical)
 # Provision the Microsoft Graph READ-ONLY prerequisites.
 # ------------------------------------------------------------
 # Provisions sections 1-6 of docs/GRAPH_LIVE_READONLY.md and STOPS.

@@ -25,16 +25,51 @@ import { resolveGraphUrl, parseRetryAfterSeconds, GRAPH_REQUEST_TIMEOUT_MS } fro
 // already admin-consented to the managed identity — never a broader set.
 export const GRAPH_DEFAULT_SCOPE = 'https://graph.microsoft.com/.default';
 
-// The approved minimum set for the first live pilot (011B decision).
-// GroupMember.Read.All is deliberately ABSENT: Microsoft documents User.Read.All
-// as the LEAST PRIVILEGED application permission for
+// The approved minimum set for the first live pilot.
+//
+// GroupMember.Read.All is deliberately ABSENT (011B): Microsoft documents
+// User.Read.All as the LEAST PRIVILEGED application permission for
 // GET /users/{id}/transitiveMemberOf, listing GroupMember.Read.All only as a
-// higher-privileged alternative. See docs/GRAPH_MANAGED_IDENTITY_011B.md.
+// higher-privileged alternative.
+//
+// MailboxSettings.Read is deliberately ABSENT (011C, Exchange Option C): it was
+// removed from the managed identity rather than left granted tenant-wide, so the
+// first pilot carries no mailbox exposure at all. `check_mailbox_status` is
+// therefore UNAVAILABLE by design — see GRAPH_READ_REQUIREMENTS below, which is
+// what makes readiness report the EFFECTIVE permission rather than the intended
+// one. See docs/GRAPH_MANAGED_IDENTITY_011B.md and docs/EXCHANGE_MAILBOX_SCOPING_011B.md.
 export const REQUIRED_GRAPH_APP_ROLES = [
   'User.Read.All',
-  'UserAuthenticationMethod.Read.All',
-  'MailboxSettings.Read'
+  'UserAuthenticationMethod.Read.All'
 ] as const;
+
+// Which application role each Watson read actually needs. Capability is derived
+// from the roles the token really carries, so a read whose permission has been
+// removed is reported UNAVAILABLE instead of failing at call time.
+export const GRAPH_READ_REQUIREMENTS: Record<string, readonly string[]> = {
+  lookup_user: ['User.Read.All'],
+  check_license_status: ['User.Read.All'],
+  check_mfa_status: ['UserAuthenticationMethod.Read.All'],
+  check_mailbox_status: ['MailboxSettings.Read'],
+  // Authorized by User.Read.All per Microsoft's least-privilege table.
+  check_group_membership: ['User.Read.All']
+} as const;
+
+export interface GraphCapabilities {
+  available: string[];
+  unavailable: string[];
+}
+
+// Effective capability from the roles actually present on the credential.
+export function effectiveGraphCapabilities(roles: readonly string[]): GraphCapabilities {
+  const granted = new Set(roles.map((r) => r.trim()).filter(Boolean));
+  const available: string[] = [];
+  const unavailable: string[] = [];
+  for (const [read, needed] of Object.entries(GRAPH_READ_REQUIREMENTS)) {
+    (needed.every((n) => granted.has(n)) ? available : unavailable).push(read);
+  }
+  return { available: available.sort(), unavailable: unavailable.sort() };
+}
 
 // Roles that must never appear on this identity. Matched case-insensitively
 // against the token's `roles` claim.
@@ -153,6 +188,52 @@ export function extractGraphRoles(accessToken: string | null | undefined): strin
     return parsed.roles.filter((r): r is string => typeof r === 'string' && r.length > 0);
   } catch {
     return [];
+  }
+}
+
+// Non-secret validation view of an access token, for the live credential check.
+//
+// SAFETY: this returns ONLY derived booleans and role NAMES. The token, its
+// subject, tenant, object id, app id, issuer, and every other claim are
+// discarded and never returned, logged, or serialized. `audienceIsGraph` is a
+// boolean rather than the audience string so no tenant-specific value escapes.
+export interface AccessTokenValidation {
+  audienceIsGraph: boolean;
+  applicationOnly: boolean;     // app-only (roles), not delegated (scp)
+  hasDelegatedScopes: boolean;  // must be false for an app-only credential
+  roles: string[];
+  expiresAtPresent: boolean;    // structural sanity only; no timestamp emitted
+}
+
+const GRAPH_AUDIENCES = new Set([
+  'https://graph.microsoft.com',
+  'https://graph.microsoft.com/',
+  '00000003-0000-0000-c000-000000000000'
+]);
+
+export function inspectAccessTokenClaims(accessToken: string | null | undefined): AccessTokenValidation {
+  const empty: AccessTokenValidation = {
+    audienceIsGraph: false, applicationOnly: false, hasDelegatedScopes: false,
+    roles: [], expiresAtPresent: false
+  };
+  if (typeof accessToken !== 'string') return empty;
+  const parts = accessToken.split('.');
+  if (parts.length < 2) return empty;
+  try {
+    const payload = Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    const c = JSON.parse(payload) as { aud?: unknown; scp?: unknown; roles?: unknown; exp?: unknown; idtyp?: unknown };
+    const roles = Array.isArray(c.roles) ? c.roles.filter((r): r is string => typeof r === 'string' && r.length > 0) : [];
+    // A delegated token carries `scp`. Its presence means this is NOT app-only.
+    const hasDelegatedScopes = typeof c.scp === 'string' && c.scp.trim().length > 0;
+    return {
+      audienceIsGraph: typeof c.aud === 'string' && GRAPH_AUDIENCES.has(c.aud.trim()),
+      applicationOnly: !hasDelegatedScopes && (c.idtyp === 'app' || roles.length > 0),
+      hasDelegatedScopes,
+      roles,
+      expiresAtPresent: typeof c.exp === 'number'
+    };
+  } catch {
+    return empty;
   }
 }
 
