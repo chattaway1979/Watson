@@ -380,6 +380,37 @@ export async function runBluebeamAdversarialTests(): Promise<{ pass: number; fai
     check('proposal still states the action is simulated', /simulated/i.test(proposal));
   }
 
+  console.log('\n[80] 016 — naming the product must not break classification');
+  {
+    // 016 staged testing: "My Bluebeam tools disappeared." escalated with ZERO
+    // evidence questions because the literal "my tools" matcher stopped
+    // matching once the brand was inserted. Naming the product must never make
+    // classification less certain.
+    const pairs: Array<[string, string, string]> = [
+      ['my tools disappeared', 'My Bluebeam tools disappeared.', 'bluebeam_markups_toolchest'],
+      ['my Tool Chest is gone', 'my Bluebeam Tool Chest is gone', 'bluebeam_markups_toolchest'],
+      ['markups are missing', 'my Bluebeam markups are missing', 'bluebeam_markups_toolchest'],
+      ['measurements are wrong', 'My Bluebeam measurements are wrong.', 'bluebeam_measurement_scale'],
+      ['the scale is wrong', 'the Bluebeam scale is wrong', 'bluebeam_measurement_scale'],
+      ['profiles are missing', 'my Bluebeam profiles are missing', 'bluebeam_profiles_settings'],
+      ['the PDF is locked', 'the Bluebeam PDF is locked', 'bluebeam_file_sync_locking']
+    ];
+    for (const [bare, branded, expected] of pairs) {
+      check(`bare: "${bare}"`, classifyScenario(bare) === expected, classifyScenario(bare));
+      check(`branded: "${branded}"`, classifyScenario(branded) === expected, classifyScenario(branded));
+    }
+    check('scenario 6 phrase classifies', classifyScenario('My Bluebeam changes are not syncing.') === 'bluebeam_file_sync_locking');
+    check('scenario 7 phrase classifies', classifyScenario('Bluebeam created a conflicting copy of my file.') === 'bluebeam_file_sync_locking');
+    check('scenario 8 phrase classifies', classifyScenario('Bluebeam says I am not licensed.') === 'bluebeam_signin_licensing');
+    check('scenario 9 phrase is NOT forced into a family',
+      !isBluebeamScenarioKey(classifyScenario('Something strange is happening in Bluebeam and I cannot explain it.')));
+    // Brand stripping must not resurrect the 014 negative controls.
+    check('Excel chart scale still not hijacked',
+      !isBluebeamScenarioKey(classifyScenario('the scale on my Excel chart is wrong')));
+    check('Word markup still not hijacked',
+      !isBluebeamScenarioKey(classifyScenario('Word document markup is missing')));
+  }
+
   console.log('\n[78] ADVERSARIAL — cross-user isolation (014)');
   {
     const mine = (await startCase(A, 'Bluebeam keeps crashing')).case;

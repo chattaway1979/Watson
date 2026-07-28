@@ -70,7 +70,17 @@ export interface BluebeamClassification {
 }
 
 export function classifyBluebeam(text: string): BluebeamClassification {
-  const t = (text ?? '').toLowerCase();
+  // Strip the product name before family matching. 016 staged testing found
+  // "My Bluebeam tools disappeared." falling out of the pack entirely while
+  // "my tools disappeared" classified correctly — naming the product broke the
+  // literal "my tools" matcher. Naming the product must never make
+  // classification LESS certain, so the brand is removed from the text the
+  // family matchers see.
+  const t = (text ?? '')
+    .toLowerCase()
+    .replace(/\b(bluebeam|revu|blue beam)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   const scores = new Map<BluebeamFamilyKey, number>();
 
   for (const m of MATCHERS) {
