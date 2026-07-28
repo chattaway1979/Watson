@@ -56,6 +56,19 @@ export async function runDeploymentPilotTests(): Promise<{ pass: number; fail: n
   check('shell mic has an accessible label', /Push to talk \(mock\)/.test(shell));
   check('shell exposes no write/remediation controls', !/disable account|reset password|password reset|delete user|wipe device|remediat|assign license/i.test(shell));
 
+  // 010C responsive/accessibility regressions (deployed employee browser pilot):
+  // (1) the composer input must be able to shrink (min-w-0) so the input row does
+  //     not overflow horizontally at a 375px viewport. min-w-0 is used ONLY on
+  //     the composer input, so its presence in the shell is a precise regression.
+  check('shell composer input has min-w-0 (no 375px overflow)', /min-w-0/.test(shell) && /aria-label="Describe your problem"/.test(shell));
+  // (2) the attachment control must be keyboard-reachable (label is a focusable
+  //     button with an accessible name — the file input itself is display:none).
+  check('shell attachment control is keyboard-accessible', /aria-label="Attach a screenshot"/.test(shell) && /tabindex="0"/i.test(shell) && /role="button"/.test(shell));
+  // (3) contrast: primary Send action uses sky-700 (>=4.5:1 on white), never the
+  //     sub-AA sky-600; safety disclaimer uses slate-400, never sub-AA slate-500.
+  check('shell Send button uses AA-contrast sky-700 (not sky-600)', /bg-sky-700[^"]*"[^>]*>Send</.test(shell) && !/bg-sky-600/.test(shell));
+  check('shell safety disclaimer uses AA-contrast slate-400 (not slate-500)', /text-slate-400[^"]*"[^>]*>Watson makes no changes/.test(shell) && !/text-slate-500/.test(shell));
+
   // deploymentConfigValidation stays value-free with codes.
   const dcv = deploymentConfigValidation(env({ WATSON_AUTH_MODE: 'entra' }));
   check('config validation flags missing admin selector', dcv.reasonCodes.includes('admin_selector_missing'));

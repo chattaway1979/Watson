@@ -146,9 +146,16 @@ export function WatsonShell() {
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') send(); }}
           placeholder="Describe your problem…"
-          className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400"
+          className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400"
         />
-        <label className="cursor-pointer rounded-full bg-slate-700 px-3 py-2 text-sm text-slate-100" title="Attach a screenshot">
+        <label
+          role="button"
+          tabIndex={0}
+          aria-label="Attach a screenshot"
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.querySelector('input')?.click(); } }}
+          className="cursor-pointer rounded-full bg-slate-700 px-3 py-2 text-sm text-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+          title="Attach a screenshot"
+        >
           📎
           <input type="file" accept="image/*" className="hidden" onChange={(e) => {
             const f = e.target.files?.[0]; if (!f) return;
@@ -156,14 +163,14 @@ export function WatsonShell() {
             e.currentTarget.value = '';
           }} />
         </label>
-        <button disabled={busy} onClick={send} className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">Send</button>
+        <button disabled={busy} onClick={send} className="rounded-lg bg-sky-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">Send</button>
       </div>
 
       {c && speaking ? (
         <button onClick={() => { ttsRef.current.speak('', {}); setSpeaking(false); setAmp(0); }} className="text-xs text-slate-400 underline">Stop speaking</button>
       ) : null}
 
-      <p className="text-center text-xs text-slate-500">Watson makes no changes without your approval. Microphone audio is never stored — only the text of your conversation.</p>
+      <p className="text-center text-xs text-slate-400">Watson makes no changes without your approval. Microphone audio is never stored — only the text of your conversation.</p>
     </div>
   );
 }
