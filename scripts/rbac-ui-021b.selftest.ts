@@ -63,7 +63,7 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
     const bodies = [...ui.matchAll(/JSON\.stringify\(\{([\s\S]*?)\}\)/g)].map((m) => m[1]);
     check('UI sends preview and confirm request bodies', bodies.length >= 2, String(bodies.length));
     check('no request body carries an actor field',
-      bodies.every((b) => !/actor|actorOid|role_admin/.test(b)), bodies.find((b) => /actor/.test(b)) ?? '');
+      bodies.every((b) => !/\bactor|\bactorOid|\brole_admin\b/.test(b)), bodies.find((b) => /actor/.test(b)) ?? '');
     check('request bodies carry only target, role, nonce and acknowledgement',
       bodies.every((b) => /targetOid|nonce|role|displayName|elevatedAcknowledged/.test(b)));
     check('routes note that the body never supplies the actor',
@@ -130,6 +130,60 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
     check('authorized actor passes', readRegistry(idOf(ADMIN)).ok === true);
     check('UI clears privileged content on 401/403', /handleAuthLoss/.test(ui) && /setRegistry\(null\)/.test(ui));
     check('UI does not cache roles as authority', /Never optimistic/.test(ui));
+  }
+
+  // ------------------------------------------------------------
+  // 021C-1B — defects found by driving the real UI in a genuine Chrome
+  // device-mode session, and fixed. Each check pins one of them so the
+  // behaviour cannot silently regress.
+  // ------------------------------------------------------------
+  console.log('\n[93b] RBAC UI — dialog keyboard ownership and focus restoration (021C-1B)');
+  {
+    // DEFECT 1: the aria-modal dialog had no Escape handler at all.
+    check('Escape is handled while the dialog is open',
+      /e\.key === 'Escape'/.test(ui) && /addEventListener\('keydown'/.test(ui));
+    check('Escape cancels rather than commits',
+      /if \(e\.key === 'Escape'\)[\s\S]{0,240}closePreview\(\)/.test(ui)
+      && !/if \(e\.key === 'Escape'\)[\s\S]{0,240}confirm\(\)/.test(ui));
+    check('the keydown listener is removed when the dialog closes',
+      /removeEventListener\('keydown'/.test(ui));
+
+    // DEFECT 2: Tab walked straight out of an aria-modal dialog.
+    check('focus is trapped inside the modal', /e\.key !== 'Tab'/.test(ui) && /Focus trap/.test(ui));
+    check('the trap wraps in both directions',
+      /e\.shiftKey && \(active === first/.test(ui) && /!e\.shiftKey && active === last/.test(ui));
+    check('focus is pulled back if it escapes the dialog',
+      /!node\.contains\(active\)[\s\S]{0,60}first\.focus\(\)/.test(ui));
+
+    // DEFECT 3: the trigger element was stored and focused after unmount, so
+    // focus silently fell to <body>.
+    check('focus target is a stable key, not a detached element reference',
+      /returnFocusKey/.test(ui) && !/returnFocus\.current\?\.focus/.test(ui));
+    check('assign and remove controls carry a stable trigger key',
+      /data-rbac-trigger=\{`assign:\$\{r\.key\}`\}/.test(ui) && /data-rbac-trigger=\{`remove:\$\{k\}`\}/.test(ui));
+    check('focus restoration falls back to the sibling control for the same role',
+      /\[data-rbac-trigger\$=":\$\{role\}"\]/.test(ui));
+    check('focus restoration runs after the re-render, not during the handler',
+      /pendingRestore/.test(ui));
+    check('section headings are programmatically focusable so a view change never drops focus',
+      /ref=\{detailHeadingRef\} tabIndex=\{-1\}/.test(ui) && /ref=\{landingHeadingRef\} tabIndex=\{-1\}/.test(ui));
+
+    // DEFECT 4: the acknowledgement was described by the dialog title, and the
+    // only explanation for a disabled confirm was a `title` attribute.
+    check('the blocking reason is real text with an id', /id="rbac-ack-hint"/.test(ui));
+    check('confirm references the blocking reason', /aria-describedby=\{!canConfirm \? 'rbac-ack-hint'/.test(ui));
+    check('the acknowledgement checkbox is described by the reason, not the dialog title',
+      /aria-describedby="rbac-ack-hint"/.test(ui) && !/aria-describedby="rbac-dlg"/.test(ui));
+    check('the last-admin block explains itself distinctly from the acknowledgement prompt',
+      /Watson requires at least one role administrator/.test(ui));
+    check('Escape is discoverable, not a hidden affordance', /Press Escape to cancel/.test(ui));
+
+    // DEFECT 5: text-style navigation controls were 20px high — below the 24px
+    // WCAG 2.5.8 minimum and impractical to tap at 375px.
+    const linkButtons = [...ui.matchAll(/className="([^"]*\bunderline\b[^"]*)"/g)].map((m) => m[1]);
+    check('every text-style navigation control has a real touch target',
+      linkButtons.length >= 3 && linkButtons.every((cn) => /min-h-11/.test(cn)),
+      `${linkButtons.length} found: ${linkButtons.filter((cn) => !/min-h-11/.test(cn)).join(' | ')}`);
   }
 
   console.log('\n[94] RBAC UI — registry-driven rendering and reserved roles');
@@ -245,7 +299,11 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
     check('assign/remove buttons have accessible names', /aria-label=\{`Assign /.test(ui) && /aria-label=\{`Remove /.test(ui));
     check('dialog has role, modal and label', /role="dialog"/.test(ui) && /aria-modal="true"/.test(ui) && /aria-labelledby="rbac-dlg"/.test(ui));
     check('dialog receives focus on open', /dialogRef\.current\?\.focus\(\)/.test(ui));
-    check('focus returns to the trigger after close', /returnFocus\.current\?\.focus/.test(ui));
+    // 021C-1B: the stored-element mechanism this used to pin was the defect —
+    // the trigger is unmounted by the view swap, so `.focus()` hit a detached
+    // node and focus fell to <body>. Pin the mechanism that actually works.
+    check('focus returns to the trigger after close',
+      /returnFocusKey/.test(ui) && /data-rbac-trigger="\$\{key\}"|\[data-rbac-trigger="\$\{key\}"\]/.test(ui) && /restoreFocus\(\)/.test(ui));
     check('live region announces status', /aria-live="polite"/.test(ui));
     check('errors use role=alert', /role="alert"/.test(ui));
     check('warnings use role=note', /role="note"/.test(ui));

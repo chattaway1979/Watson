@@ -72,7 +72,15 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
   // Guards double-click / rapid resubmit of a non-idempotent confirmation.
   const inFlight = useRef(false);
   const dialogRef = useRef<HTMLDivElement | null>(null);
-  const returnFocus = useRef<HTMLElement | null>(null);
+  // 021C-1B: the preview is a VIEW SWAP, not an overlay, so the button that
+  // opened it is unmounted by the time focus should come back. Storing the
+  // element meant `.focus()` was called on a detached node and focus silently
+  // fell to <body>. Store a stable KEY instead and re-find the control after the
+  // view returns — falling back to the section heading when the trigger no
+  // longer exists (an assigned role moves from "Assign" to "Remove").
+  const returnFocusKey = useRef<string | null>(null);
+  const detailHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const landingHeadingRef = useRef<HTMLHeadingElement | null>(null);
 
   // Revocation handling: any 401/403 tears down privileged content rather than
   // leaving stale administrative controls on screen.
@@ -112,9 +120,32 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
     setRoles(r.data.roles); setView('detail');
   }
 
-  async function openPreview(op: 'assign' | 'remove', role: WatsonRoleKey, trigger?: HTMLElement | null) {
+  // Re-find the control that opened the dialog. If it is gone (the role moved
+  // between the "assign" and "remove" lists) fall back to the sibling control for
+  // the same role, then to the section heading — never to <body>.
+  const restoreFocus = useCallback(() => {
+    const key = returnFocusKey.current;
+    if (key) {
+      const exact = document.querySelector<HTMLElement>(`[data-rbac-trigger="${key}"]`);
+      if (exact) { exact.focus(); return; }
+      const role = key.split(':')[1];
+      const sibling = document.querySelector<HTMLElement>(`[data-rbac-trigger$=":${role}"]`);
+      if (sibling) { sibling.focus(); return; }
+    }
+    detailHeadingRef.current?.focus();
+  }, []);
+
+  // Focus must be restored AFTER React has re-rendered the detail view, or the
+  // trigger does not exist yet and the heading effect wins the race.
+  const pendingRestore = useRef(false);
+  function closePreview() {
+    pendingRestore.current = true;
+    setPreview(null); setAck(false); setView('detail');
+  }
+
+  async function openPreview(op: 'assign' | 'remove', role: WatsonRoleKey) {
     if (!selected) return;
-    returnFocus.current = trigger ?? null;
+    returnFocusKey.current = `${op}:${role}`;
     setProblem(null); setAck(false);
     const r = await api<Preview>(`/api/it-agent/rbac/${op}/preview`, {
       method: 'POST',
@@ -147,8 +178,7 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
     setStatus(r.data.idempotent
       ? `No change needed — ${preview.roleDisplayName} was already ${op === 'assign' ? 'assigned' : 'absent'}.`
       : `${preview.roleDisplayName} ${op === 'assign' ? 'assigned' : 'removed'}.`);
-    setPreview(null); setView('detail');
-    returnFocus.current?.focus?.();
+    closePreview();
   }
 
   async function refreshRoles() {
@@ -164,10 +194,51 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
     setAudit(r.data.events); setView('audit');
   }
 
+  // ------------------------------------------------------------
   // Dialog focus management for the two preview states.
+  //
+  // 021C-1B browser validation found three real defects here: Escape did not
+  // dismiss the dialog, Tab walked straight out of an aria-modal dialog, and
+  // focus was never restored to the control that opened it. All three are fixed
+  // together because they are one behaviour: a modal owns the keyboard while it
+  // is open and hands focus back when it closes.
+  // ------------------------------------------------------------
+  const dialogOpen = view === 'assign' || view === 'remove';
+
   useEffect(() => {
-    if (view === 'assign' || view === 'remove') dialogRef.current?.focus();
-  }, [view]);
+    if (dialogOpen) { dialogRef.current?.focus(); return; }
+    if (pendingRestore.current) { pendingRestore.current = false; restoreFocus(); return; }
+    if (view === 'detail') detailHeadingRef.current?.focus();
+    else if (view === 'landing') landingHeadingRef.current?.focus();
+  }, [dialogOpen, view, roles, restoreFocus]);
+
+  useEffect(() => {
+    if (!dialogOpen) return;
+    const node = dialogRef.current;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        // Escape must never commit; it is exactly the Cancel path. Focus is
+        // restored by the view effect once the detail view has re-rendered.
+        e.preventDefault();
+        closePreview();
+        return;
+      }
+      if (e.key !== 'Tab' || !node) return;
+      // Focus trap: an aria-modal dialog must contain the tab ring.
+      const focusables = [...node.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+      )].filter((el) => el.offsetParent !== null);
+      if (!focusables.length) { e.preventDefault(); node.focus(); return; }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && (active === first || active === node)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+      else if (active && !node.contains(active)) { e.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => document.removeEventListener('keydown', onKeyDown, true);
+  }, [dialogOpen, restoreFocus]);
 
   const canConfirm = preview ? (!preview.requiresElevatedAcknowledgement || ack) && !busy && !preview.lastAdminImplication?.includes('will be refused') : false;
   const roleList = registry ? Object.values(registry) : [];
@@ -201,7 +272,8 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
       {/* ---- Landing + search ---- */}
       {view === 'landing' ? (
         <section className="space-y-4">
-          <h2 className="text-base font-semibold">Find an employee</h2>
+          {/* Focusable so a view change never drops the keyboard at <body>. */}
+          <h2 ref={landingHeadingRef} tabIndex={-1} className="text-base font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">Find an employee</h2>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <label htmlFor="rbac-q" className="sr-only">Search employees by name or email</label>
             <input
@@ -274,8 +346,8 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
       {/* ---- Employee detail ---- */}
       {view === 'detail' && selected ? (
         <section className="space-y-3">
-          <button onClick={() => { setView('landing'); setStatus(''); }} className="text-sm underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">← Back to search</button>
-          <h2 className="break-words text-base font-semibold">{selected.displayName}</h2>
+          <button onClick={() => { setView('landing'); setStatus(''); }} className="inline-flex min-h-11 items-center text-sm underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">← Back to search</button>
+          <h2 ref={detailHeadingRef} tabIndex={-1} className="break-words text-base font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">{selected.displayName}</h2>
           <p className="break-all text-xs text-slate-400">{selected.upn} · ID ending {selected.oid.slice(-6)}</p>
 
           <h3 className="text-sm font-semibold">Current Watson roles</h3>
@@ -286,7 +358,8 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
                 return (
                   <li key={k} className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 p-3">
                     <span className="min-w-0 flex-1 break-words">{meta?.displayName ?? k}</span>
-                    <button onClick={(ev) => openPreview('remove', k, ev.currentTarget)}
+                    <button onClick={() => openPreview('remove', k)}
+                      data-rbac-trigger={`remove:${k}`}
                       aria-label={`Remove ${meta?.displayName ?? k}`}
                       className="rounded-lg border border-rose-500 px-3 py-1.5 text-sm text-rose-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300">
                       ✕ Remove
@@ -304,7 +377,8 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
                 <span className="min-w-0 flex-1 break-words">{r.displayName}
                   {r.status === 'reserved' ? <span className="ml-2 text-xs text-amber-200">(reserved)</span> : null}
                 </span>
-                <button onClick={(ev) => openPreview('assign', r.key, ev.currentTarget)}
+                <button onClick={() => openPreview('assign', r.key)}
+                  data-rbac-trigger={`assign:${r.key}`}
                   aria-label={`Assign ${r.displayName}`}
                   className="rounded-lg bg-sky-700 px-3 py-1.5 text-sm text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">
                   Assign
@@ -312,7 +386,7 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
               </li>
             ))}
           </ul>
-          <button onClick={() => openAudit(selected.oid)} className="text-sm underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">
+          <button onClick={() => openAudit(selected.oid)} className="inline-flex min-h-11 items-center text-sm underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">
             View this employee’s access history
           </button>
         </section>
@@ -359,31 +433,44 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
 
           {preview.requiresElevatedAcknowledgement ? (
             <label className="flex items-start gap-2 text-sm">
+              {/* 021C-1B: described by the reason the confirm control is blocked,
+                  not by the dialog title, which said nothing useful. */}
               <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)}
-                aria-describedby="rbac-dlg"
+                aria-describedby="rbac-ack-hint"
                 className="mt-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300" />
               <span>I understand this is a high-impact Watson role change.</span>
             </label>
           ) : null}
+          {/* The blocking reason is real text in the dialog, so it is announced —
+              a `title` on a disabled button is not reliably conveyed. */}
+          {!canConfirm ? (
+            <p id="rbac-ack-hint" className="text-sm text-amber-200">
+              {preview.lastAdminImplication?.includes('will be refused')
+                ? 'This removal is blocked: Watson requires at least one role administrator.'
+                : 'Tick the acknowledgement above to enable confirmation.'}
+            </p>
+          ) : null}
 
           <div className="flex min-w-0 flex-wrap gap-2">
             <button onClick={confirm} disabled={!canConfirm}
+              aria-describedby={!canConfirm ? 'rbac-ack-hint' : undefined}
               title={!canConfirm ? 'Acknowledge the elevated risk to continue' : undefined}
               className={`rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 ${view === 'remove' ? 'bg-rose-700' : 'bg-sky-700'}`}>
               {busy ? 'Working…' : view === 'assign' ? 'Confirm assignment' : 'Confirm removal'}
             </button>
-            <button onClick={() => { setPreview(null); setView('detail'); returnFocus.current?.focus?.(); }}
+            <button onClick={closePreview}
               className="rounded-lg border border-slate-600 px-4 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">
               Cancel
             </button>
           </div>
+          <p className="text-xs text-slate-400">Press Escape to cancel.</p>
         </section>
       ) : null}
 
       {/* ---- Audit history ---- */}
       {view === 'audit' ? (
         <section className="space-y-3">
-          <button onClick={() => setView(selected ? 'detail' : 'landing')} className="text-sm underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">← Back</button>
+          <button onClick={() => setView(selected ? 'detail' : 'landing')} className="inline-flex min-h-11 items-center text-sm underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">← Back</button>
           <h2 className="text-base font-semibold">Access history</h2>
           <div className="flex flex-wrap gap-2">
             {(['all', 'success', 'refused'] as const).map((f) => (
