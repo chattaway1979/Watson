@@ -111,8 +111,10 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
     setSearching(true);
     const r = await api<{ results: Entry[]; source: string; truncated: boolean; provenanceMismatch?: boolean }>(`/api/it-agent/rbac/search?q=${encodeURIComponent(query.trim())}`);
     setSearching(false);
-    if (!r.ok) { handleAuthLoss(r.status); setProblem(r.problem); setResults([]); return; }
+    if (!r.ok) { handleAuthLoss(r.status); setProblem(r.problem); setResults([]); setDirectory(null); return; }
     setResults(r.data.results);
+    // The label is whatever the SERVER said about the rows it just returned.
+    setDirectory({ source: r.data.source, provenanceMismatch: r.data.provenanceMismatch });
     setStatus(`${r.data.results.length} result${r.data.results.length === 1 ? '' : 's'}.`);
   }
 
