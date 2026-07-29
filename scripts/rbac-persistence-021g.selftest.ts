@@ -1,84 +1,139 @@
 /* ============================================================
  * Watson — 021G : shared RBAC persistence, atomicity and migration.
- * Deterministic; NO network, NO database, NO real identity.
  * Every identity is synthetic. The in-memory adapter is the REFERENCE
  * implementation, so these assertions define the semantics the Postgres
  * adapter must satisfy.
+ *
+ * 021G-3: the assertions below ARE the contract, and they now execute against
+ * every adapter rather than only against memory. Nothing about an assertion
+ * changed - only where its store comes from. The suite takes a ContractDriver,
+ * so there is exactly ONE copy of these checks; a Postgres run cannot drift
+ * into a weaker variant of them, because no weaker variant exists.
+ *
+ * The default driver is in-memory and stays deterministic with NO network and
+ * NO database. The Postgres driver is opt-in via WATSON_PG_TEST_* and is run by
+ * scripts/rbac-postgres-contract-021g3.selftest.ts.
  * ============================================================ */
 import { readFileSync } from 'node:fs';
 import { MemoryRbacStore } from '../src/lib/it-agent/rbac/memory-adapter';
-import { digestNonce, generateNonce, type PreviewRecord } from '../src/lib/it-agent/rbac/persistence';
+import { digestNonce, generateNonce, type PreviewRecord, type RbacStoreAdapter } from '../src/lib/it-agent/rbac/persistence';
 import { planMigration, applyMigration, checksumOf, MigrationError } from '../src/lib/it-agent/rbac/migrate';
 import type { RoleAssignment, RbacAuditEvent } from '../src/lib/it-agent/rbac/store';
 
 const OID = (n: number) => `00000000-0000-4000-9000-${String(n).padStart(12, '0')}`;
 const A = OID(1), B = OID(2), C = OID(3);
 
-const grant = (s: MemoryRbacStore, target: string, role: RoleAssignment['role'], actor = A) =>
+// The surface these assertions need. Deliberately permissive about sync-vs-async
+// on the test-only helpers: `await` on a plain value IS the value, so one
+// expression reads both a Map-backed count and a SELECT COUNT(*).
+export interface ContractStore extends RbacStoreAdapter {
+  auditRowCount(): number | Promise<number>;
+  allAssignments(): readonly RoleAssignment[] | Promise<RoleAssignment[]>;
+  previewCount(): number | Promise<number>;
+  dumpPreviewsForTests(): Array<Record<string, unknown>> | Promise<Array<Record<string, unknown>>>;
+  importAssignment(a: RoleAssignment): 'inserted' | 'skipped' | Promise<'inserted' | 'skipped'>;
+  importAudit(e: RbacAuditEvent): 'inserted' | 'skipped' | Promise<'inserted' | 'skipped'>;
+}
+
+export interface ContractDriver {
+  label: string;
+  kind: string;
+  /** A FRESH, EMPTY store. Isolation between blocks is the driver's job. */
+  make(): Promise<ContractStore>;
+  /** A store that is genuinely unreachable - not one pretending to be. */
+  unavailableStore(): Promise<RbacStoreAdapter>;
+  dispose?(): Promise<void>;
+}
+
+export const memoryDriver: ContractDriver = {
+  label: 'in-memory (reference)',
+  kind: 'memory',
+  make: async () => new MemoryRbacStore() as unknown as ContractStore,
+  unavailableStore: async () => {
+    const s = new MemoryRbacStore();
+    s.inject = { unavailable: true };
+    return s;
+  }
+};
+
+// Failure injection travels on the INPUT, not on the store, so the identical
+// call exercises the real commit path of whichever adapter is under test.
+type Inject = { failAssignmentWrite?: boolean; failAuditWrite?: boolean };
+
+const grant = (s: RbacStoreAdapter, target: string, role: RoleAssignment['role'], actor = A, inject?: Inject) =>
   s.grantRole({
     targetOid: target, targetDisplayName: null, targetUpn: null, role,
     source: 'administrator', actorOid: actor, actorUpn: null,
     correlationId: 'c-' + Math.random().toString(36).slice(2, 8),
-    elevatedAcknowledged: true, previousRoles: [], resultingRoles: [role]
+    elevatedAcknowledged: true, previousRoles: [], resultingRoles: [role], inject
   });
-const revoke = (s: MemoryRbacStore, target: string, role: RoleAssignment['role'], actor = A) =>
+const revoke = (s: RbacStoreAdapter, target: string, role: RoleAssignment['role'], actor = A, inject?: Inject) =>
   s.revokeRole({
     targetOid: target, role, actorOid: actor, actorUpn: null,
     correlationId: 'c-' + Math.random().toString(36).slice(2, 8),
-    elevatedAcknowledged: true, previousRoles: [role], resultingRoles: []
+    elevatedAcknowledged: true, previousRoles: [role], resultingRoles: [], inject
   });
 
+// A digest is a sha256 hex string everywhere in the system, and the Postgres
+// schema enforces that shape with a CHECK constraint. The fixture therefore uses
+// a real 64-hex digest rather than a short label, so this suite exercises the
+// value shape the product actually stores.
+let dseq = 0;
+const fakeDigest = () => (++dseq).toString(16).padStart(8, '0').repeat(8).slice(0, 64);
 const preview = (over: Partial<PreviewRecord> = {}): PreviewRecord => ({
-  digest: 'd-' + Math.random().toString(36).slice(2, 10),
+  digest: fakeDigest(),
   operation: 'assign', actorOid: A, targetOid: B, role: 'watson_technician',
   stateVersion: 0, expiresAt: new Date(Date.now() + 600_000).toISOString(),
   elevatedRequired: false, payload: '{}', ...over
 });
 
-export async function runRbacPersistenceTests(): Promise<{ pass: number; fail: number; failures: string[] }> {
+export async function runRbacPersistenceTests(
+  drv: ContractDriver = memoryDriver
+): Promise<{ pass: number; fail: number; failures: string[] }> {
   let pass = 0, fail = 0; const failures: string[] = [];
+  const SFX = drv.kind === 'memory' ? '' : ' [' + drv.kind + ']';
   const check = (n: string, c: boolean, d = '') => {
     if (c) { pass++; console.log('  ✅ ' + n); }
     else { fail++; failures.push(n + (d ? ` — ${d}` : '')); console.log('  ❌ ' + n + (d ? ` — ${d}` : '')); }
   };
 
-  console.log('\n[121] RBAC shared store — assignments, audit and bootstrap (021G)');
+  console.log('\n[121] RBAC shared store — assignments, audit and bootstrap (021G)' + SFX);
   {
-    const s = new MemoryRbacStore();
+    const s = await drv.make();
     check('a fresh store has no administrators', (await s.countActiveRoleAdmins()) === 0);
-    check('store reports its kind', s.kind === 'memory');
+    check('store reports its kind', s.kind === drv.kind);
     check('store answers a liveness probe', (await s.ping()) === true);
 
     const g = await grant(s, B, 'watson_technician');
     check('grant applies', g.ok === true && g.data.applied === true);
     check('durable read reflects the grant', (await s.activeRoles(B)).join() === 'watson_technician');
-    check('grant appended exactly one audit row', s.auditRowCount() === 1);
+    check('grant appended exactly one audit row', (await s.auditRowCount()) === 1);
 
     const dup = await grant(s, B, 'watson_technician');
     check('re-granting is idempotent, not a second row',
       dup.ok === true && dup.data.applied === false && dup.data.idempotent === true);
     check('assignment uniqueness holds (principal + role)',
-      s.allAssignments().filter((x) => x.active && x.targetOid === B && x.role === 'watson_technician').length === 1);
+      (await s.allAssignments()).filter((x) => x.active && x.targetOid === B && x.role === 'watson_technician').length === 1);
 
     const r = await revoke(s, B, 'watson_technician');
     check('revoke applies', r.ok === true && r.data.applied === true);
     check('revoked role is gone from the active set', (await s.activeRoles(B)).length === 0);
     check('revocation is a deactivation, not a delete (history preserved)',
-      s.allAssignments().some((x) => x.targetOid === B && x.active === false && x.removedAt !== null));
+      (await s.allAssignments()).some((x) => x.targetOid === B && x.active === false && x.removedAt !== null));
     const dupR = await revoke(s, B, 'watson_technician');
     check('re-revoking is idempotent', dupR.ok === true && dupR.data.idempotent === true);
 
     // Audit is append-only from the application's view.
-    const beforeCount = s.auditRowCount();
+    const beforeCount = await s.auditRowCount();
     await grant(s, C, 'watson_employee');
-    check('audit only ever grows', s.auditRowCount() > beforeCount);
+    check('audit only ever grows', (await s.auditRowCount()) > beforeCount);
     const rows = await s.listAudit({ limit: 500 });
     check('audit rows carry actor, target, operation, outcome and correlation',
       rows.every((e) => e.actorOid && e.operation && e.outcome && e.correlationId));
     check('audit read is bounded', (await s.listAudit({ limit: 9999 })).length <= 500);
 
     // Bootstrap idempotency.
-    const s2 = new MemoryRbacStore();
+    const s2 = await drv.make();
     const b1 = await s2.tryBootstrap(A, 'boot-1');
     check('bootstrap creates the first administrator',
       b1.ok === true && b1.data.applied === true && (await s2.countActiveRoleAdmins()) === 1);
@@ -90,45 +145,40 @@ export async function runRbacPersistenceTests(): Promise<{ pass: number; fail: n
       (await s2.listAudit({ limit: 500 })).filter((e) => e.operation === 'bootstrap' && e.outcome === 'success').length === 1);
   }
 
-  console.log('\n[122] RBAC shared store — transactional atomicity (021G)');
+  console.log('\n[122] RBAC shared store — transactional atomicity (021G)' + SFX);
   {
     // grant + audit must land together, or neither.
-    const s = new MemoryRbacStore();
-    s.inject = { failAuditWrite: true };
-    const g = await grant(s, B, 'watson_technician');
+    const s = await drv.make();
+    const g = await grant(s, B, 'watson_technician', A, { failAuditWrite: true });
     check('grant is rolled back when the audit write fails', g.ok === false && g.reason === 'audit_failure');
     check('no assignment survives a failed audit', (await s.activeRoles(B)).length === 0);
-    check('no orphaned audit row survives', s.auditRowCount() === 0);
+    check('no orphaned audit row survives', (await s.auditRowCount()) === 0);
 
-    s.inject = { failAssignmentWrite: true };
-    const g2 = await grant(s, B, 'watson_technician');
+    const g2 = await grant(s, B, 'watson_technician', A, { failAssignmentWrite: true });
     check('grant fails closed when the assignment write fails',
       g2.ok === false && g2.reason === 'persistence_failure');
-    check('no audit row describes a change that did not happen', s.auditRowCount() === 0);
+    check('no audit row describes a change that did not happen', (await s.auditRowCount()) === 0);
 
     // revoke + audit atomicity
-    s.inject = {};
     await grant(s, B, 'watson_technician');
-    const auditAfterGrant = s.auditRowCount();
-    s.inject = { failAuditWrite: true };
-    const r = await revoke(s, B, 'watson_technician');
+    const auditAfterGrant = await s.auditRowCount();
+    const r = await revoke(s, B, 'watson_technician', A, { failAuditWrite: true });
     check('revoke is rolled back when the audit write fails', r.ok === false && r.reason === 'audit_failure');
     check('the role is still held after a rolled-back revoke',
       (await s.activeRoles(B)).join() === 'watson_technician');
-    check('audit did not grow on a rolled-back revoke', s.auditRowCount() === auditAfterGrant);
+    check('audit did not grow on a rolled-back revoke', (await s.auditRowCount()) === auditAfterGrant);
 
     // store unavailable => fail closed, never silent success
-    s.inject = { unavailable: true };
-    const un = await grant(s, C, 'watson_employee');
+    const dead = await drv.unavailableStore();
+    const un = await grant(dead, C, 'watson_employee');
     check('a configured-but-unavailable store fails closed',
       un.ok === false && un.reason === 'store_unavailable');
-    check('liveness probe reports unavailable', (await s.ping()) === false);
-    s.inject = {};
+    check('liveness probe reports unavailable', (await dead.ping()) === false);
   }
 
-  console.log('\n[123] RBAC shared store — final-administrator protection is transactional (021G)');
+  console.log('\n[123] RBAC shared store — final-administrator protection is transactional (021G)' + SFX);
   {
-    const s = new MemoryRbacStore();
+    const s = await drv.make();
     await s.tryBootstrap(A, 'boot');
     check('one administrator exists', (await s.countActiveRoleAdmins()) === 1);
     const solo = await revoke(s, A, 'watson_role_admin');
@@ -153,7 +203,7 @@ export async function runRbacPersistenceTests(): Promise<{ pass: number; fail: n
       [r1, r2].some((x) => x.ok === false && x.reason === 'last_admin_protected'));
 
     // Many concurrent removals, same invariant.
-    const s2 = new MemoryRbacStore();
+    const s2 = await drv.make();
     await s2.tryBootstrap(A, 'boot');
     await grant(s2, B, 'watson_role_admin');
     const many = await Promise.all(Array.from({ length: 8 }, (_, i) =>
@@ -165,9 +215,9 @@ export async function runRbacPersistenceTests(): Promise<{ pass: number; fail: n
       String(many.filter((x) => x.ok === true && x.data.applied === true).length));
   }
 
-  console.log('\n[124] RBAC shared store — preview nonces (021G)');
+  console.log('\n[124] RBAC shared store — preview nonces (021G)' + SFX);
   {
-    const s = new MemoryRbacStore();
+    const s = await drv.make();
     const raw = await generateNonce();
     const raw2 = await generateNonce();
     check('nonces are unguessable (256-bit CSPRNG, base64url)', raw.length > 40 && raw !== raw2);
@@ -183,11 +233,11 @@ export async function runRbacPersistenceTests(): Promise<{ pass: number; fail: n
     await s.putPreview(preview({ digest: d }));
     // Serialise what is ACTUALLY held: a Map stringifies to {}, which would make
     // this assertion pass without proving anything.
-    const dump = JSON.stringify(s.dumpPreviewsForTests());
+    const dump = JSON.stringify(await s.dumpPreviewsForTests());
     check('the raw nonce is never stored', !dump.includes(raw), 'raw nonce found in store');
     check('only the digest is stored', dump.includes(d), dump.slice(0, 90));
     check('the stored record carries no field equal to the raw nonce',
-      !Object.values(s.dumpPreviewsForTests()[0] ?? {}).some((v) => v === raw));
+      !Object.values((await s.dumpPreviewsForTests())[0] ?? {}).some((v) => v === raw));
 
     const binding = { operation: 'assign' as const, actorOid: A, targetOid: B, role: 'watson_technician' };
     // Binding: actor / target / role / action substitution all rejected.
@@ -233,9 +283,9 @@ export async function runRbacPersistenceTests(): Promise<{ pass: number; fail: n
       results.filter((r) => !r.ok).every((r) => (r as { reason: string }).reason === 'replayed_preview'));
 
     // Housekeeping.
-    const before = s.previewCount();
+    const before = await s.previewCount();
     const purged = await s.purgeExpiredPreviews(Date.now());
-    check('expired and consumed previews are purged', purged > 0 && s.previewCount() < before);
+    check('expired and consumed previews are purged', purged > 0 && (await s.previewCount()) < before);
 
     // Errors reveal nothing.
     const failedOnly = JSON.stringify(results.filter((r) => !r.ok));
@@ -246,7 +296,7 @@ export async function runRbacPersistenceTests(): Promise<{ pass: number; fail: n
       failedOnly.slice(0, 90));
   }
 
-  console.log('\n[125] RBAC migration — determinism, verification and idempotency (021G)');
+  console.log('\n[125] RBAC migration — determinism, verification and idempotency (021G)' + SFX);
   {
     const src = {
       rbacAssignments: [
@@ -273,7 +323,7 @@ export async function runRbacPersistenceTests(): Promise<{ pass: number; fail: n
     check('checksum changes when a record changes',
       checksumOf(plan.assignments.map((a, i) => i === 0 ? { ...a, role: 'watson_employee' as const } : a), plan.audit) !== plan.checksum);
 
-    const dest = new MemoryRbacStore();
+    const dest = await drv.make();
     const rep = await applyMigration(plan, dest);
     check('all assignments migrated', rep.inserted.assignments === 2);
     check('all audit rows migrated', rep.inserted.audit === 1);
@@ -287,7 +337,7 @@ export async function runRbacPersistenceTests(): Promise<{ pass: number; fail: n
     const rerun = await applyMigration(plan, dest);
     check('a rerun inserts nothing', rerun.inserted.assignments === 0 && rerun.inserted.audit === 0);
     check('a rerun is reported as idempotent', rerun.idempotentRerun === true);
-    check('a rerun does not duplicate assignments', dest.allAssignments().length === 2);
+    check('a rerun does not duplicate assignments', (await dest.allAssignments()).length === 2);
     check('a rerun does not duplicate audit', (await dest.listAudit({ limit: 500 })).length === 1);
     check('the administrator count is unchanged after rerun', (await dest.countActiveRoleAdmins()) === 1);
 
@@ -319,8 +369,11 @@ export async function runRbacPersistenceTests(): Promise<{ pass: number; fail: n
       noAdmin.sourceCounts.activeAdmins === 0);
   }
 
+  // Source-shape assertions are about the FILES, not about a store, so they are
+  // driver-independent: they run once, under the reference driver, rather than
+  // being re-counted for every adapter.
+  if (drv.kind === 'memory') {
   console.log('\n[126] RBAC shared store — contract shape and leakage (021G)');
-  {
     const p = readFileSync('src/lib/it-agent/rbac/persistence.ts', 'utf8');
     const m = readFileSync('src/lib/it-agent/rbac/memory-adapter.ts', 'utf8');
     const g = readFileSync('src/lib/it-agent/rbac/migrate.ts', 'utf8');
