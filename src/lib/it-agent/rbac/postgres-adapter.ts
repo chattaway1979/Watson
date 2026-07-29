@@ -225,18 +225,41 @@ export class PostgresRbacStore implements RbacStoreAdapter {
    *  identity has no rights on the audit table" need completely different fixes.
    *  This reports the phase and the classified category and NOTHING else — no
    *  driver message, no SQLSTATE, no host, no user, no token. */
+  /** A coarse, SAFE cause for a failed connection. "store_unavailable" is the
+   *  right thing to tell the security core but it collapses three completely
+   *  different operator actions — fix the identity's database role, fix TLS
+   *  trust, fix the firewall — into one word. These labels are derived from
+   *  error CODES only and contain no host, user, message or SQLSTATE. */
+  private static cause(e: unknown): string {
+    const code = String((e as { code?: string } | null)?.code ?? '');
+    if (/^28/.test(code)) return 'auth_rejected';          // invalid authorization / bad password
+    if (/^3D/.test(code)) return 'database_absent';
+    if (/^42/.test(code)) return 'insufficient_privilege_or_missing_relation';
+    if (code === 'ECONNREFUSED') return 'refused';
+    if (code === 'ETIMEDOUT' || code === 'ECONNRESET') return 'network_timeout';
+    if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return 'dns_failure';
+    if (/CERT|TLS|SSL|DEPTH_ZERO|SELF_SIGNED/i.test(code)) return 'tls_untrusted';
+    const msg = String((e as Error | null)?.message ?? '');
+    // pg reports a pool acquisition timeout with no code.
+    if (/timeout/i.test(msg)) return 'connect_timeout';
+    if (/certificate|self.signed|unable to verify/i.test(msg)) return 'tls_untrusted';
+    if (/password|authentication/i.test(msg)) return 'auth_rejected';
+    return 'unknown';
+  }
+
   async probe(): Promise<{
     ok: boolean;
     phase: 'token' | 'connect' | 'schema' | 'query' | 'none';
     category: PersistenceFailure | 'ok';
+    cause?: string;
   }> {
     // 1. Can the identity get a token at all? This isolates a platform/identity
     //    problem from a database problem.
     try {
       const t = await this.cfg.getAccessToken();
-      if (!t) return { ok: false, phase: 'token', category: 'store_unavailable' };
-    } catch {
-      return { ok: false, phase: 'token', category: 'store_unavailable' };
+      if (!t) return { ok: false, phase: 'token', category: 'store_unavailable', cause: 'token_empty' };
+    } catch (e) {
+      return { ok: false, phase: 'token', category: 'store_unavailable', cause: PostgresRbacStore.cause(e) };
     }
     // 2. Can a connection be established and authenticated?
     try {

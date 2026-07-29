@@ -25,38 +25,42 @@ export const dynamic = 'force-dynamic';
 // guess — and the reason code below makes the condition visible either way.
 async function storeHealth(): Promise<{
   store: string; multiInstanceSafe: boolean; reachable: boolean | null;
-  phase: string | null; category: string | null; reasonCodes: string[];
+  phase: string | null; category: string | null; cause: string | null; reasonCodes: string[];
 }> {
   const prov = rbacStoreProvenance(process.env);
   if (prov.store === 'invalid') {
     return { store: 'invalid', multiInstanceSafe: false, reachable: null,
-      phase: 'config', category: 'store_unavailable', reasonCodes: ['rbac_store_unknown'] };
+      phase: 'config', category: 'store_unavailable', cause: 'configuration_invalid', reasonCodes: ['rbac_store_unknown'] };
   }
   // Bounded: a health probe must never hang on a database that is not answering.
   let reachable: boolean | null = null;
   let phase: string | null = null;
   let category: string | null = null;
+  let cause: string | null = null;
   try {
     const store = rbacStore(process.env);
     // A yes/no answer tells an operator nothing actionable: "unreachable" and
     // "the identity has no rights on a table" need different fixes. Where the
     // adapter can say WHICH stage failed, report that — phase and classified
     // category only, never a driver message.
-    const probe = (store as { probe?: () => Promise<{ ok: boolean; phase: string; category: string }> }).probe;
+    const probe = (store as { probe?: () => Promise<{ ok: boolean; phase: string; category: string; cause?: string }> }).probe;
     const result = await Promise.race([
-      probe ? probe.call(store) : store.ping().then((ok) => ({ ok, phase: 'none', category: ok ? 'ok' : 'store_unavailable' })),
-      new Promise<{ ok: boolean; phase: string; category: string }>((r) =>
-        setTimeout(() => r({ ok: false, phase: 'connect', category: 'store_unavailable' }), 8_000))
+      probe ? probe.call(store) : store.ping().then((ok) => ({
+        ok, phase: 'none', category: ok ? 'ok' : 'store_unavailable',
+        cause: ok ? undefined : 'unknown' as string | undefined
+      })),
+      new Promise<{ ok: boolean; phase: string; category: string; cause?: string }>((r) =>
+        setTimeout(() => r({ ok: false, phase: 'connect', category: 'store_unavailable', cause: 'probe_timeout' }), 8_000))
     ]);
     reachable = result.ok;
-    if (!result.ok) { phase = result.phase; category = result.category; }
+    if (!result.ok) { phase = result.phase; category = result.category; cause = result.cause ?? null; }
   } catch {
     // A misconfigured store throws on construction. That is a real condition and
     // is reported rather than swallowed.
-    reachable = false; phase = 'config'; category = 'store_unavailable';
+    reachable = false; phase = 'config'; category = 'store_unavailable'; cause = 'configuration_invalid';
   }
   return {
-    store: prov.store, multiInstanceSafe: prov.multiInstanceSafe, reachable, phase, category,
+    store: prov.store, multiInstanceSafe: prov.multiInstanceSafe, reachable, phase, category, cause,
     reasonCodes: reachable === false ? ['rbac_store_unreachable'] : []
   };
 }
@@ -80,6 +84,7 @@ export async function GET() {
       // enough to know what to fix, with nothing an attacker could use.
       rbacStoreFailurePhase: s.phase,
       rbacStoreFailureCategory: s.category,
+      rbacStoreFailureCause: s.cause,
       // Which worker answered. Two workers must be observably distinguishable, or
       // "the cluster agrees" cannot be verified from outside.
       workerId: process.env.WEBSITE_INSTANCE_ID?.slice(0, 12) ?? null,
