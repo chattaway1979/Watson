@@ -10,7 +10,7 @@
 // The hostile entries are deliberate: they are the fixtures that prove display
 // data is rendered as inert text rather than markup or instructions.
 // ============================================================
-import type { DirectoryEntry } from './service';
+import type { DirectoryEntry, DirectorySource } from './service';
 
 const oid = (n: number) => `00000000-0000-4000-9000-${String(n).padStart(12, '0')}`;
 
@@ -27,3 +27,13 @@ export const STAGED_DIRECTORY: readonly DirectoryEntry[] = [
   { oid: oid(8), displayName: 'Ünïcødé Ñame ‮reversed', upn: 'unicode@staged.invalid' },
   { oid: oid(9), displayName: 'Verylong '.repeat(40).trim(), upn: 'long@staged.invalid' }
 ] as const;
+
+// 021C-2: the directory declares its own provenance. This is the value the
+// search response reports, so no environment flag can cause these fixtures to be
+// presented to an administrator as live tenant data. A future Graph-backed
+// directory must supply `provenance: 'graph_live'` itself — and only when the
+// rows genuinely came from Graph.
+export const STAGED_DIRECTORY_SOURCE: DirectorySource = {
+  provenance: 'mock_staged_directory',
+  entries: STAGED_DIRECTORY
+};

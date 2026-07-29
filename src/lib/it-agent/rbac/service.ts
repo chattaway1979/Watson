@@ -576,9 +576,26 @@ export function readAuditHistory(
 // ------------------------------------------------------------
 export interface DirectoryEntry { oid: string; displayName: string; upn: string }
 
+export type DirectoryProvenance = 'mock_staged_directory' | 'graph_live';
+
+// 021C-2: provenance travels WITH the data. Staging found that `source` was
+// derived from IT_AGENT_GRAPH_LIVE_READONLY while the entries still came from
+// whatever directory the caller passed — so turning the flag on would have made
+// the response claim `graph_live` while serving hardcoded mock fixtures. An
+// administrator deciding who to grant access to must never be told mock rows are
+// live tenant data. A directory now declares what it is; the flag only reports
+// the state of the gate.
+export interface DirectorySource {
+  readonly provenance: DirectoryProvenance;
+  readonly entries: readonly DirectoryEntry[];
+}
+
 export interface SearchResult {
-  source: 'mock_staged_directory' | 'graph_live';
+  source: DirectoryProvenance;
   liveReadsEnabled: boolean;
+  // True when the live-read gate is on but the data served is NOT live. Makes a
+  // misconfiguration visible instead of silently mislabelled.
+  provenanceMismatch: boolean;
   results: DirectoryEntry[];
   truncated: boolean;
 }
@@ -596,7 +613,7 @@ export function sanitizeDirectoryText(v: unknown): string {
 
 export function searchEmployees(
   actor: TrustedIdentity | null, queryRaw: unknown,
-  directory: readonly DirectoryEntry[], env: NodeJS.ProcessEnv = process.env
+  directory: readonly DirectoryEntry[] | DirectorySource, env: NodeJS.ProcessEnv = process.env
 ): Result<SearchResult> {
   const gate = requireCapability(actor, 'rbac.employee.read', 'employee_search', null);
   if (!gate.ok) return gate as never;
@@ -605,17 +622,28 @@ export function searchEmployees(
   // A minimum length prevents using search as a directory dump.
   if (q.length < MIN_QUERY) return refuse('malformed_payload');
 
+  // A bare array carries no provenance claim, so it can only ever be reported as
+  // staged mock data. Claiming `graph_live` requires a directory that explicitly
+  // declares itself live — the environment flag alone can never promote it.
+  const entries: readonly DirectoryEntry[] = Array.isArray(directory)
+    ? directory
+    : (directory as DirectorySource).entries;
+  const provenance: DirectoryProvenance = Array.isArray(directory)
+    ? 'mock_staged_directory'
+    : (directory as DirectorySource).provenance;
+
   const liveReadsEnabled = (env.IT_AGENT_GRAPH_LIVE_READONLY ?? 'false').toLowerCase() === 'true';
-  const matches = directory
+  const matches = entries
     .filter((e) => `${e.displayName} ${e.upn}`.toLowerCase().includes(q))
     .map((e) => ({ oid: e.oid, displayName: sanitizeDirectoryText(e.displayName), upn: sanitizeDirectoryText(e.upn) }));
 
   return {
     ok: true,
     data: {
-      // Live Graph reads remain disabled, so this is honestly labelled.
-      source: liveReadsEnabled ? 'graph_live' : 'mock_staged_directory',
+      // Reported from the DATA's own provenance, never from the gate flag.
+      source: provenance,
       liveReadsEnabled,
+      provenanceMismatch: liveReadsEnabled && provenance !== 'graph_live',
       results: matches.slice(0, MAX_RESULTS),
       truncated: matches.length > MAX_RESULTS
     }

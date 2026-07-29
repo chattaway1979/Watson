@@ -2,9 +2,12 @@
  * Watson — 021B : RBAC administrator UI + route integration tests
  * Deterministic; no network, no Graph, no tenant write.
  * ============================================================ */
-import { readFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execSync } from 'node:child_process';
 import { trustedIdentityFromHeaders, statusFor, messageFor, localTestIdentity } from '../src/lib/it-agent/rbac/http';
-import { STAGED_DIRECTORY } from '../src/lib/it-agent/rbac/directory';
+import { STAGED_DIRECTORY, STAGED_DIRECTORY_SOURCE } from '../src/lib/it-agent/rbac/directory';
 import { WATSON_ROLES, WATSON_ROLE_KEYS } from '../src/lib/it-agent/rbac/roles';
 import {
   __resetRbacForTests, activeRoles, countActiveRoleAdmins, listAudit, upsertActiveAssignment, commitAtomically
@@ -287,6 +290,85 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
     check('long names wrap rather than overflow', /break-words/.test(ui) && /break-all/.test(ui));
     check('search minimum length enforced server-side', searchEmployees(idOf(ADMIN2), 'Sa', STAGED_DIRECTORY).ok === false);
     check('staged directory honestly labelled in UI', /staged mock directory/.test(ui));
+  }
+
+  // ------------------------------------------------------------
+  // 021C-2 — staging findings. Both of these shipped in 07b6ff6 and were caught
+  // while deploying to Azure. Each check fails against the pre-fix code.
+  // ------------------------------------------------------------
+  console.log('\n[110] RBAC — directory provenance is never inferred from the environment flag (021C-2)');
+  {
+    world();
+    const LIVE = { IT_AGENT_GRAPH_LIVE_READONLY: 'true' } as unknown as NodeJS.ProcessEnv;
+    const OFF = { IT_AGENT_GRAPH_LIVE_READONLY: 'false' } as unknown as NodeJS.ProcessEnv;
+
+    // THE DEFECT: with the gate on, mock fixtures were reported as `graph_live`.
+    const withFlag = searchEmployees(idOf(ADMIN), 'Sam', STAGED_DIRECTORY_SOURCE, LIVE);
+    check('mock fixtures are NOT relabelled graph_live when the gate is on',
+      withFlag.ok === true && withFlag.data.source === 'mock_staged_directory',
+      withFlag.ok ? withFlag.data.source : 'refused');
+    check('the live-read gate state is still reported honestly',
+      withFlag.ok === true && withFlag.data.liveReadsEnabled === true);
+    check('a provenance mismatch is surfaced, not hidden',
+      withFlag.ok === true && withFlag.data.provenanceMismatch === true);
+    check('no mismatch is reported when the gate is off',
+      (() => { const r = searchEmployees(idOf(ADMIN), 'Sam', STAGED_DIRECTORY_SOURCE, OFF);
+               return r.ok === true && r.data.provenanceMismatch === false && r.data.source === 'mock_staged_directory'; })());
+
+    // A bare array carries no provenance claim, so it can only be staged data.
+    const bare = searchEmployees(idOf(ADMIN), 'Sam', STAGED_DIRECTORY, LIVE);
+    check('a directory without declared provenance can never claim graph_live',
+      bare.ok === true && bare.data.source === 'mock_staged_directory');
+
+    // Only a directory that declares itself live may be reported as live.
+    const declaredLive = searchEmployees(idOf(ADMIN), 'Sam',
+      { provenance: 'graph_live' as const, entries: STAGED_DIRECTORY }, LIVE);
+    check('only a self-declared live directory is reported as graph_live',
+      declaredLive.ok === true && declaredLive.data.source === 'graph_live');
+
+    check('the staged directory declares itself as mock',
+      STAGED_DIRECTORY_SOURCE.provenance === 'mock_staged_directory');
+    const svc = readFileSync('src/lib/it-agent/rbac/service.ts', 'utf8');
+    check('source is no longer derived from the environment flag',
+      !/source:\s*liveReadsEnabled\s*\?/.test(svc));
+    const searchRoute = readFileSync('src/app/api/it-agent/rbac/search/route.ts', 'utf8');
+    check('the search route passes a provenance-bearing directory',
+      /STAGED_DIRECTORY_SOURCE/.test(searchRoute));
+  }
+
+  console.log('\n[111] RBAC — deployment artifact must not bundle a local runtime store (021C-2)');
+  {
+    // THE DEFECT: Next's file tracing copied data/watson-store.json into
+    // .next/standalone, so the artifact shipped synthetic role assignments.
+    const gate = readFileSync('scripts/check-no-bundled-store.mjs', 'utf8');
+    check('a package gate script exists', /PACKAGE GATE FAILED/.test(gate));
+    check('the gate fails the build rather than warning', /process\.exit\(1\)/.test(gate));
+    check('the gate looks for the runtime store by name', /watson-store\.json/.test(gate));
+    const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+    check('the gate runs as part of npm run build',
+      /check-no-bundled-store/.test(pkg.scripts.build), pkg.scripts.build);
+    check('the gate is separately invocable', typeof pkg.scripts['verify:package'] === 'string');
+    const nextCfg = readFileSync('next.config.mjs', 'utf8');
+    check('file tracing excludes the runtime store directory at the root cause',
+      /outputFileTracingExcludes/.test(nextCfg) && /\.\/data\/\*\*/.test(nextCfg));
+
+    // Behavioural: plant a store in a fake standalone tree and prove the gate trips.
+    const tmp = mkdtempSync(join(tmpdir(), 'wpkg-'));
+    let trippedOnStore = false, passedWhenClean = false;
+    try {
+      mkdirSync(join(tmp, '.next', 'standalone', 'data'), { recursive: true });
+      writeFileSync(join(tmp, '.next', 'standalone', 'data', 'watson-store.json'), '{"rbacAssignments":[]}');
+      copyFileSync('scripts/check-no-bundled-store.mjs', join(tmp, 'check.mjs'));
+      try {
+        execSync('node check.mjs', { cwd: tmp, stdio: 'pipe' });
+      } catch { trippedOnStore = true; }
+      rmSync(join(tmp, '.next', 'standalone', 'data'), { recursive: true, force: true });
+      try { execSync('node check.mjs', { cwd: tmp, stdio: 'pipe' }); passedWhenClean = true; } catch { passedWhenClean = false; }
+    } finally {
+      try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    check('the gate FAILS when a runtime store is bundled', trippedOnStore);
+    check('the gate PASSES on a clean artifact', passedWhenClean);
   }
 
   console.log('\n[97] RBAC UI — responsive and accessibility source probes');
