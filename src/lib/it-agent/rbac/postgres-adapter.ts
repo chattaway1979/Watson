@@ -218,6 +218,49 @@ export class PostgresRbacStore implements RbacStoreAdapter {
     try { await this.q('SELECT 1'); return true; } catch { return false; }
   }
 
+  /** Which STAGE of bringing the store up fails, and in which safe category.
+   *
+   *  ping() answers yes/no, which is the right contract for the security core but
+   *  useless to an operator: "the database is unreachable" and "the managed
+   *  identity has no rights on the audit table" need completely different fixes.
+   *  This reports the phase and the classified category and NOTHING else — no
+   *  driver message, no SQLSTATE, no host, no user, no token. */
+  async probe(): Promise<{
+    ok: boolean;
+    phase: 'token' | 'connect' | 'schema' | 'query' | 'none';
+    category: PersistenceFailure | 'ok';
+  }> {
+    // 1. Can the identity get a token at all? This isolates a platform/identity
+    //    problem from a database problem.
+    try {
+      const t = await this.cfg.getAccessToken();
+      if (!t) return { ok: false, phase: 'token', category: 'store_unavailable' };
+    } catch {
+      return { ok: false, phase: 'token', category: 'store_unavailable' };
+    }
+    // 2. Can a connection be established and authenticated?
+    try {
+      const pool = await this.getPool();
+      const c = await pool.connect();
+      try { await c.query('SELECT 1'); } finally { c.release(); }
+    } catch (e) {
+      return { ok: false, phase: 'connect', category: PostgresRbacStore.classify(e) };
+    }
+    // 3. Does the schema apply? (A privilege gap shows up here, not at connect.)
+    try {
+      await this.ensureSchema();
+    } catch (e) {
+      return { ok: false, phase: 'schema', category: PostgresRbacStore.classify(e) };
+    }
+    // 4. Can the RBAC tables actually be read?
+    try {
+      await this.q('SELECT 1 FROM rbac_assignment LIMIT 1');
+    } catch (e) {
+      return { ok: false, phase: 'query', category: PostgresRbacStore.classify(e) };
+    }
+    return { ok: true, phase: 'none', category: 'ok' };
+  }
+
   // ---- reads --------------------------------------------------------------
   async activeRoles(oid: string): Promise<WatsonRoleKey[]> {
     const rows = await this.q<{ role: WatsonRoleKey }>(
