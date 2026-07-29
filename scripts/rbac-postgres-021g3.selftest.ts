@@ -215,6 +215,27 @@ export async function runRbacPostgresStructureTests(): Promise<{ pass: number; f
       return !/"h"|"d"|"u"|host|database|user/i.test(p);
     })());
 
+    // Health must make the ACTIVE store observable over HTTP. Without that,
+    // "staging is on PostgreSQL" is a claim about configuration rather than an
+    // observed fact, and a worker that failed to connect looks healthy.
+    const hr = readFileSync('src/app/api/health/route.ts', 'utf8');
+    check('health reports which RBAC store a worker is actually using',
+      /rbacStore: s\.store/.test(hr));
+    check('health reports whether that store is multi-instance safe',
+      /rbacStoreMultiInstanceSafe/.test(hr));
+    check('health probes the store rather than trusting configuration',
+      /\.ping\(\)/.test(hr));
+    check('the health store probe is bounded so it cannot hang the endpoint',
+      /Promise\.race/.test(hr) && /setTimeout/.test(hr));
+    check('an unreachable store surfaces a reason code',
+      /'rbac_store_unreachable'/.test(hr));
+    check('health identifies which worker answered, so two workers are distinguishable',
+      /WEBSITE_INSTANCE_ID/.test(hr));
+    check('health never exposes a host, database, user, port or connection string',
+      !/WATSON_RBAC_PG_HOST|WATSON_RBAC_PG_DATABASE|WATSON_RBAC_PG_USER|WATSON_RBAC_PG_PORT|connectionString/.test(hr));
+    check('a store construction failure is reported, not thrown out of health',
+      /catch \{[\s\S]{0,220}reachable = false/.test(hr));
+
     const sp = readFileSync('src/lib/it-agent/rbac/store-provider.ts', 'utf8');
     check('store selection has no path that falls back to JSON once postgres is chosen',
       !/catch[\s\S]{0,160}new JsonRbacStore/.test(sp));
