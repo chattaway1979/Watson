@@ -24,11 +24,13 @@ export const dynamic = 'force-dynamic';
 // behaviour lives where it belongs — the RBAC entry point refuses, it does not
 // guess — and the reason code below makes the condition visible either way.
 async function storeHealth(): Promise<{
-  store: string; multiInstanceSafe: boolean; reachable: boolean | null; reasonCodes: string[];
+  store: string; multiInstanceSafe: boolean; reachable: boolean | null;
+  phase: string | null; category: string | null; reasonCodes: string[];
 }> {
   const prov = rbacStoreProvenance(process.env);
   if (prov.store === 'invalid') {
-    return { store: 'invalid', multiInstanceSafe: false, reachable: null, reasonCodes: ['rbac_store_unknown'] };
+    return { store: 'invalid', multiInstanceSafe: false, reachable: null,
+      phase: 'config', category: 'store_unavailable', reasonCodes: ['rbac_store_unknown'] };
   }
   // Bounded: a health probe must never hang on a database that is not answering.
   let reachable: boolean | null = null;
