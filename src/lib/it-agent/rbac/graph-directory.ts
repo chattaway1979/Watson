@@ -25,6 +25,10 @@
 // ============================================================
 import type { DirectoryEntry, DirectorySource } from './service';
 import { sanitizeDirectoryText } from './service';
+import {
+  evaluateEligibility, loadDirectoryPolicy, DirectoryPolicyError,
+  type DirectoryCandidate, type DirectoryEligibilityPolicy
+} from './directory-policy';
 import type { GraphHttpClient } from '../graph/graph-config';
 import { loadManagedIdentityGraphConfig, isGraphLiveReadOnlyEnabled } from '../graph/graph-config';
 import { createManagedIdentityTokenProvider, createManagedIdentityGraphHttpClient } from '../graph/graph-managed-identity';
@@ -42,7 +46,8 @@ export type DirectoryUnavailableReason =
   | 'graph_throttled'
   | 'graph_unavailable'
   | 'graph_malformed_response'
-  | 'query_too_short';
+  | 'query_too_short'
+  | 'policy_configuration_invalid';
 
 export type DirectoryLookup =
   | { ok: true; source: DirectorySource }
@@ -76,12 +81,19 @@ export function buildUserSearchPath(sanitizedQuery: string): string {
   ].join(' OR ');
   const params = [
     `$search=${encodeURIComponent(search)}`,
-    `$select=${encodeURIComponent('id,displayName,userPrincipalName,mail,accountEnabled')}`,
+    `$select=${encodeURIComponent(GRAPH_USER_FIELDS.join(','))}`,
     `$top=${DIRECTORY_MAX_RESULTS}`,
     '$count=true'
   ].join('&');
   return `/users?${params}`;
 }
+
+// The MINIMUM attribute set the eligibility policy and UI need. Nothing broader
+// is requested, so nothing broader can be mapped, logged or leaked.
+export const GRAPH_USER_FIELDS = [
+  'id', 'displayName', 'userPrincipalName', 'mail', 'userType', 'accountEnabled',
+  'employeeId', 'employeeType', 'department', 'jobTitle'
+] as const;
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -90,15 +102,28 @@ interface GraphUser {
   displayName?: unknown;
   userPrincipalName?: unknown;
   mail?: unknown;
+  userType?: unknown;
   accountEnabled?: unknown;
+  employeeId?: unknown;
+  employeeType?: unknown;
+  department?: unknown;
+  jobTitle?: unknown;
 }
+
+const str = (v: unknown): string | null => {
+  const s = typeof v === 'string' ? sanitizeDirectoryText(v) : '';
+  return s ? s : null;
+};
 
 // Map a Graph payload into the RBAC directory shape.
 //
 // Returns null when the response is not recognisably a Graph user collection, so
 // a malformed or hostile body becomes an explicit failure rather than an empty
 // result that would look like "no such employee".
-export function mapGraphUsers(body: unknown): DirectoryEntry[] | null {
+export function mapGraphUsers(
+  body: unknown,
+  policy: DirectoryEligibilityPolicy = loadDirectoryPolicy()
+): DirectoryEntry[] | null {
   if (!body || typeof body !== 'object') return null;
   const value = (body as { value?: unknown }).value;
   if (!Array.isArray(value)) return null;
@@ -115,11 +140,38 @@ export function mapGraphUsers(body: unknown): DirectoryEntry[] | null {
     const displayName = sanitizeDirectoryText(raw.displayName ?? upn);
     if (!displayName && !upn) continue;
 
-    // Disabled accounts are excluded: granting Watson access to an account that
-    // cannot sign in is never the intent, and showing it invites a mistake.
-    if (raw.accountEnabled === false) continue;
+    // 021E: a disabled account is no longer silently dropped — it is returned,
+    // clearly marked and non-selectable, so an administrator searching for
+    // someone learns the account is disabled instead of "no such employee".
+    const candidate: DirectoryCandidate = {
+      oid,
+      displayName: displayName || upn,
+      userPrincipalName: upn,
+      mail: str(raw.mail),
+      userType: str(raw.userType),
+      accountEnabled: typeof raw.accountEnabled === 'boolean' ? raw.accountEnabled : null,
+      employeeId: str(raw.employeeId),
+      employeeType: str(raw.employeeType),
+      department: str(raw.department),
+      jobTitle: str(raw.jobTitle)
+    };
+    const decision = evaluateEligibility(candidate, policy);
+    if (decision.hidden) continue;
 
-    out.push({ oid, displayName: displayName || upn, upn });
+    // Only the minimum DTO the UI needs. Department, jobTitle, employeeId and
+    // employeeType informed the DECISION but are never returned to the browser:
+    // explaining a refusal must not become a directory-metadata disclosure.
+    out.push({
+      oid,
+      displayName: candidate.displayName,
+      upn,
+      mail: candidate.mail,
+      accountEnabled: candidate.accountEnabled,
+      userType: candidate.userType,
+      employeeEligibility: decision.employeeEligibility,
+      eligibilityReasonCode: decision.eligibilityReasonCode,
+      selectionAllowed: decision.selectionAllowed
+    });
     if (out.length >= DIRECTORY_MAX_RESULTS) break;
   }
   return out;
@@ -156,6 +208,17 @@ export async function lookupEmployeesViaGraph(
   const q = sanitizeDirectoryQuery(queryRaw);
   if (q.length < DIRECTORY_MIN_QUERY) return { ok: false, reason: 'query_too_short' };
 
+  // Load the eligibility policy BEFORE any tenant read. Malformed configuration
+  // fails closed: it is better to serve no directory than to serve one filtered
+  // by a policy nobody verified.
+  let policy: DirectoryEligibilityPolicy;
+  try {
+    policy = loadDirectoryPolicy(env);
+  } catch (e) {
+    if (e instanceof DirectoryPolicyError) return { ok: false, reason: 'policy_configuration_invalid' };
+    return { ok: false, reason: 'policy_configuration_invalid' };
+  }
+
   const config = loadManagedIdentityGraphConfig(env);
   const http = deps.httpClient
     ?? createManagedIdentityGraphHttpClient(config, createManagedIdentityTokenProvider(env));
@@ -184,7 +247,7 @@ export async function lookupEmployeesViaGraph(
 
   if (status !== 200) return { ok: false, reason: reasonForStatus(status) };
 
-  const entries = mapGraphUsers(body);
+  const entries = mapGraphUsers(body, policy);
   if (entries === null) return { ok: false, reason: 'graph_malformed_response' };
 
   // Only here — a real 200 whose body parsed as a Graph user collection — may the

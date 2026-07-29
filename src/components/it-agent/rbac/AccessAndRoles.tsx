@@ -21,7 +21,28 @@ interface RoleMeta {
   capabilities: string[]; risk: string; status: 'functional' | 'reserved';
   requiresElevatedConfirmation: boolean;
 }
-interface Entry { oid: string; displayName: string; upn: string }
+interface Entry {
+  oid: string; displayName: string; upn: string;
+  mail?: string | null; accountEnabled?: boolean | null; userType?: string | null;
+  employeeEligibility?: 'eligible' | 'not_eligible' | 'ambiguous';
+  eligibilityReasonCode?: string;
+  selectionAllowed?: boolean;
+}
+
+// 021E: plain operational language for each policy decision. The wording never
+// asserts that someone IS an employee unless the policy actually concluded that.
+const ELIGIBILITY_LABEL: Record<string, { badge: string; note: string; tone: 'ok' | 'warn' | 'blocked' }> = {
+  eligible_employee:              { badge: 'Active employee', note: '', tone: 'ok' },
+  explicitly_allowed:             { badge: 'Allowed by policy', note: 'Allowed by explicit Watson configuration.', tone: 'ok' },
+  disabled_account:               { badge: 'Disabled account', note: 'This account is disabled and cannot sign in. Watson roles cannot be assigned to it.', tone: 'blocked' },
+  guest_account:                  { badge: 'Guest or external', note: 'This is a guest or external account, not an H&R Electric employee account.', tone: 'blocked' },
+  excluded_service_identity:      { badge: 'Service identity', note: 'This looks like a service or automation account, not a person.', tone: 'blocked' },
+  excluded_shared_mailbox:        { badge: 'Shared mailbox', note: 'This looks like a shared mailbox, not an individual employee.', tone: 'blocked' },
+  excluded_bootstrap_identity:    { badge: 'Administrative identity', note: 'This is a tenant administrative or emergency-access identity. It must not be given Watson roles in normal operation.', tone: 'blocked' },
+  excluded_cross_tenant_identity: { badge: 'Outside H&R Electric', note: 'This identity belongs to another organisation.', tone: 'blocked' },
+  ambiguous_member:               { badge: 'Unconfirmed', note: 'Watson cannot confirm this is an employee account. Verify with IT before granting access.', tone: 'warn' },
+  explicitly_excluded:            { badge: 'Excluded by policy', note: 'Excluded by explicit Watson configuration.', tone: 'blocked' }
+};
 interface Preview {
   nonce: string; operation: 'assign' | 'remove'; targetOid: string; role: WatsonRoleKey;
   roleDisplayName: string; roleStatus: string; risk: string;
@@ -313,17 +334,51 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
             results.length === 0
               ? <p className="text-sm text-slate-400">No matches. Try a different name or email.</p>
               : <ul className="space-y-2">
-                  {results.map((e) => (
-                    <li key={e.oid}>
-                      <button onClick={() => loadRoles(e)}
-                        className="w-full rounded-lg border border-slate-700 bg-slate-900 p-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">
+                  {results.map((e) => {
+                    // Default to NOT selectable: a row whose eligibility the server
+                    // did not state must never behave like a confirmed employee.
+                    const allowed = e.selectionAllowed !== false;
+                    const meta = ELIGIBILITY_LABEL[e.eligibilityReasonCode ?? 'eligible_employee']
+                      ?? ELIGIBILITY_LABEL.ambiguous_member;
+                    const edge = meta.tone === 'ok' ? 'border-slate-700'
+                      : meta.tone === 'warn' ? 'border-amber-500/60' : 'border-rose-500/50';
+                    const body = (
+                      <>
                         {/* React escapes this — hostile display data renders as text. */}
                         <span className="block break-words font-medium">{e.displayName}</span>
                         <span className="block break-all text-xs text-slate-400">{e.upn}</span>
                         <span className="block break-all text-[11px] text-slate-500">ID ending {e.oid.slice(-6)}</span>
-                      </button>
-                    </li>
-                  ))}
+                        {/* Status carries a glyph + word, never colour alone. */}
+                        <span className={`mt-1 inline-block rounded border px-1.5 py-0.5 text-[11px] ${
+                          meta.tone === 'ok' ? 'border-emerald-500/50 text-emerald-200'
+                            : meta.tone === 'warn' ? 'border-amber-500/60 text-amber-200'
+                              : 'border-rose-500/60 text-rose-200'}`}>
+                          {meta.tone === 'ok' ? '✓ ' : meta.tone === 'warn' ? '? ' : '✕ '}{meta.badge}
+                        </span>
+                        {meta.note ? (
+                          <span className="mt-1 block break-words text-[11px] text-slate-400">{meta.note}</span>
+                        ) : null}
+                      </>
+                    );
+                    return (
+                      <li key={e.oid}>
+                        {allowed ? (
+                          <button onClick={() => loadRoles(e)}
+                            className={`w-full rounded-lg border ${edge} bg-slate-900 p-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300`}>
+                            {body}
+                          </button>
+                        ) : (
+                          // Deliberately NOT a button: an identity Watson cannot
+                          // vouch for is not one click away from a role grant.
+                          <div aria-disabled="true"
+                            className={`w-full rounded-lg border ${edge} bg-slate-900/60 p-3 text-left`}>
+                            {body}
+                            <span className="mt-1 block text-[11px] text-slate-500">Not selectable.</span>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
           ) : null}
 

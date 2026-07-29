@@ -575,7 +575,21 @@ export function readAuditHistory(
 // data: it is length-capped and stripped of control characters so a display
 // name cannot carry an injection payload into a later prompt or log.
 // ------------------------------------------------------------
-export interface DirectoryEntry { oid: string; displayName: string; upn: string }
+// 021E: the DTO the browser receives. `oid` remains the ONLY durable identity
+// key — displayName, upn and mail are presentation and are never authoritative.
+// The eligibility fields describe how the directory policy classified the row so
+// the UI can present risk honestly; they are NOT an authorization control.
+export interface DirectoryEntry {
+  oid: string;
+  displayName: string;
+  upn: string;
+  mail?: string | null;
+  accountEnabled?: boolean | null;
+  userType?: string | null;
+  employeeEligibility?: 'eligible' | 'not_eligible' | 'ambiguous';
+  eligibilityReasonCode?: string;
+  selectionAllowed?: boolean;
+}
 
 export type DirectoryProvenance = 'mock_staged_directory' | 'graph_live';
 
@@ -636,7 +650,19 @@ export function searchEmployees(
   const liveReadsEnabled = (env.IT_AGENT_GRAPH_LIVE_READONLY ?? 'false').toLowerCase() === 'true';
   const matches = entries
     .filter((e) => `${e.displayName} ${e.upn}`.toLowerCase().includes(q))
-    .map((e) => ({ oid: e.oid, displayName: sanitizeDirectoryText(e.displayName), upn: sanitizeDirectoryText(e.upn) }));
+    .map((e) => ({
+      oid: e.oid,
+      displayName: sanitizeDirectoryText(e.displayName),
+      upn: sanitizeDirectoryText(e.upn),
+      // A row that already carries an eligibility decision (Graph) keeps it; a
+      // staged fixture is selectable so local flows behave as before.
+      mail: e.mail ?? null,
+      accountEnabled: e.accountEnabled ?? true,
+      userType: e.userType ?? 'Member',
+      employeeEligibility: e.employeeEligibility ?? 'eligible',
+      eligibilityReasonCode: e.eligibilityReasonCode ?? 'eligible_employee',
+      selectionAllowed: e.selectionAllowed ?? true
+    }));
 
   return {
     ok: true,
