@@ -137,8 +137,10 @@ export function checksumOf(assignments: RoleAssignment[], audit: RbacAuditEvent[
 }
 
 export interface MigrationTarget extends RbacStoreAdapter {
-  importAssignment(a: RoleAssignment): 'inserted' | 'skipped';
-  importAudit(e: RbacAuditEvent): 'inserted' | 'skipped';
+  // Awaited by applyMigration, so an in-memory target may answer synchronously
+  // while a database target answers with a Promise. One migrator drives both.
+  importAssignment(a: RoleAssignment): 'inserted' | 'skipped' | Promise<'inserted' | 'skipped'>;
+  importAudit(e: RbacAuditEvent): 'inserted' | 'skipped' | Promise<'inserted' | 'skipped'>;
 }
 
 // Apply a plan. Safe to run repeatedly: identity-keyed inserts make a rerun a
@@ -151,13 +153,13 @@ export async function applyMigration(
   const skipped = { assignments: 0, audit: 0 };
 
   for (const a of plan.assignments) {
-    (target.importAssignment(a) === 'inserted' ? inserted : skipped).assignments++;
+    ((await target.importAssignment(a)) === 'inserted' ? inserted : skipped).assignments++;
   }
   for (const e of plan.audit) {
-    (target.importAudit(e) === 'inserted' ? inserted : skipped).audit++;
+    ((await target.importAudit(e)) === 'inserted' ? inserted : skipped).audit++;
   }
 
-  const destAssignments = target.allAssignments ? [...target.allAssignments()] : [];
+  const destAssignments = target.allAssignments ? [...(await target.allAssignments())] : [];
   const destAudit = await target.listAudit({ limit: 500 });
   const destAdmins = await target.countActiveRoleAdmins();
 
@@ -180,8 +182,10 @@ export async function applyMigration(
 
 // Declared so the migration can read `allAssignments` off an adapter that
 // exposes it, without widening the core adapter contract for production use.
+// Awaited at the call site, so an in-memory adapter may answer synchronously
+// while a database adapter answers with a Promise.
 declare module './persistence' {
   interface RbacStoreAdapter {
-    allAssignments?(): readonly RoleAssignment[];
+    allAssignments?(): readonly RoleAssignment[] | Promise<RoleAssignment[]>;
   }
 }

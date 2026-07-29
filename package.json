@@ -19,7 +19,9 @@
   "dependencies": {
     "@azure/identity": "4.13.1",
     "@azure/keyvault-secrets": "4.11.2",
+    "@types/pg": "^8.20.0",
     "next": "16.2.12",
+    "pg": "^8.22.0",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
