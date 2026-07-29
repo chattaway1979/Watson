@@ -47,6 +47,7 @@ import { runCaseFamilyIntegrityTests } from './case-family-integrity-017.selftes
 import { runRbacSecurityCoreTests } from './rbac-security-core-021a.selftest';
 import { runRbacUiTests } from './rbac-ui-021b.selftest';
 import { runRbacLocalBootstrapTests } from './rbac-local-bootstrap-021c1a.selftest';
+import { runRbacGraphDirectoryTests } from './rbac-graph-directory-021d.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -247,6 +248,9 @@ async function main() {
 
   const rbacLocalBootstrap = await runRbacLocalBootstrapTests();
   pass += rbacLocalBootstrap.pass; fail += rbacLocalBootstrap.fail; failures.push(...rbacLocalBootstrap.failures);
+
+  const rbacGraphDirectory = await runRbacGraphDirectoryTests();
+  pass += rbacGraphDirectory.pass; fail += rbacGraphDirectory.fail; failures.push(...rbacGraphDirectory.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {

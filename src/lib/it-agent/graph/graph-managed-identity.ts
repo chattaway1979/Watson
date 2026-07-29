@@ -334,11 +334,18 @@ export function createManagedIdentityGraphHttpClient(
       if (!token) throw new Error('Managed identity token unavailable.');
       return token;
     },
-    async get(path: string, token: string): Promise<{ status: number; body: unknown; retryAfterSeconds?: number }> {
+    async get(
+      path: string,
+      token: string,
+      extraHeaders?: Readonly<Record<string, string>>
+    ): Promise<{ status: number; body: unknown; retryAfterSeconds?: number }> {
       // Throws if `path` targets any host other than the configured Graph origin,
       // so the bearer token is only ever attached to a genuine Graph request.
       const url = resolveGraphUrl(path, config.graphBaseUrl);
-      const res = await fetchWithTimeout(url, { method: 'GET', headers: { Authorization: `Bearer ${token}` } });
+      // Authorization is applied LAST so a caller-supplied header can never
+      // replace or strip the credential.
+      const headers: Record<string, string> = { ...(extraHeaders ?? {}), Authorization: `Bearer ${token}` };
+      const res = await fetchWithTimeout(url, { method: 'GET', headers });
       let body: unknown = null;
       try { body = await res.json(); } catch { body = null; }
       return { status: res.status, body, retryAfterSeconds: parseRetryAfterSeconds(res.headers.get('retry-after')) };

@@ -116,6 +116,10 @@ export function statusFor(reason: RefusalReason): number {
     case 'persistence_failure':
     case 'audit_failure':
       return 500;
+    // The live directory is a dependency, not a client error. 503 tells the
+    // caller to retry rather than to change the request.
+    case 'directory_unavailable':
+      return 503;
     default:
       return 400;
   }
@@ -153,6 +157,8 @@ export function messageFor(reason: RefusalReason): { message: string; nextAction
       return { message: 'The change could not be saved, so nothing was changed.', nextAction: 'Retry shortly. If it persists, contact IT.' };
     case 'audit_failure':
       return { message: 'The change was rolled back because it could not be recorded.', nextAction: 'Retry shortly. If it persists, contact IT.' };
+    case 'directory_unavailable':
+      return { message: 'The employee directory is temporarily unavailable, so no results can be shown.', nextAction: 'Retry shortly. Watson will not show stand-in data in its place.' };
     case 'malformed_payload':
       return { message: 'That request was not valid.', nextAction: 'Refresh the page and try again.' };
     default:

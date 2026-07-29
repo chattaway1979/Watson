@@ -63,7 +63,8 @@ export type RefusalReason =
   | 'self_elevation' | 'last_admin_protected' | 'stale_preview' | 'replayed_preview'
   | 'actor_mismatch' | 'target_mismatch' | 'role_mismatch' | 'elevated_ack_required'
   | 'malformed_payload' | 'target_not_found' | 'persistence_failure' | 'audit_failure'
-  | 'not_assignable' | 'not_removable' | 'self_assignment_forbidden';
+  | 'not_assignable' | 'not_removable' | 'self_assignment_forbidden'
+  | 'directory_unavailable';
 
 export type Result<T> =
   | { ok: true; data: T }

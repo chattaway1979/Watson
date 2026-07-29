@@ -187,7 +187,16 @@ export interface GraphHttpClient {
   // GET a Graph path. Returns HTTP status + parsed JSON body, plus the parsed
   // Retry-After (seconds) when the server supplied one — so the retry layer can
   // honor server-directed backoff on 429/503.
-  get(path: string, token: string): Promise<{ status: number; body: unknown; retryAfterSeconds?: number }>;
+  // 021D: `extraHeaders` is optional and additive. Microsoft Graph requires
+  // `ConsistencyLevel: eventual` for $search on /users; without a seam for it the
+  // only alternative was prefix-only matching, which cannot find a person by
+  // surname. Existing implementations that ignore the parameter remain valid.
+  // Authorization is always set by the transport and can never be overridden here.
+  get(
+    path: string,
+    token: string,
+    extraHeaders?: Readonly<Record<string, string>>
+  ): Promise<{ status: number; body: unknown; retryAfterSeconds?: number }>;
 }
 
 // Real client factory. NOTE: this is only invoked behind the live gate with a

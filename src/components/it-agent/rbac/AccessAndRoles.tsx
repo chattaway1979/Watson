@@ -59,6 +59,9 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
   const [registry, setRegistry] = useState<Record<string, RoleMeta> | null>(null);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Entry[] | null>(null);
+  // 021D: the directory label is whatever the SERVER reported for the rows it
+  // actually returned. The client never infers "live" from configuration.
+  const [directory, setDirectory] = useState<{ source: string; provenanceMismatch?: boolean } | null>(null);
   const [searching, setSearching] = useState(false);
   const [selected, setSelected] = useState<Entry | null>(null);
   const [roles, setRoles] = useState<WatsonRoleKey[] | null>(null);
@@ -106,7 +109,7 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
     setProblem(null);
     if (query.trim().length < 3) { setProblem({ message: 'Enter at least 3 characters.', nextAction: 'Type more of the name or email.' }); return; }
     setSearching(true);
-    const r = await api<{ results: Entry[]; source: string; truncated: boolean }>(`/api/it-agent/rbac/search?q=${encodeURIComponent(query.trim())}`);
+    const r = await api<{ results: Entry[]; source: string; truncated: boolean; provenanceMismatch?: boolean }>(`/api/it-agent/rbac/search?q=${encodeURIComponent(query.trim())}`);
     setSearching(false);
     if (!r.ok) { handleAuthLoss(r.status); setProblem(r.problem); setResults([]); return; }
     setResults(r.data.results);
@@ -292,7 +295,16 @@ export function AccessAndRoles({ actorRoles, actorOid }: { actorRoles: WatsonRol
             </button>
           </div>
           <p className="text-xs text-slate-400">
-            Directory source: staged mock directory (live Microsoft Graph lookup is disabled).
+            {directory === null
+              ? 'Directory source: shown after a search.'
+              : directory.source === 'graph_live'
+                ? 'Directory source: live Microsoft Entra directory (read-only lookup).'
+                : 'Directory source: staged mock directory (live Microsoft Graph lookup is disabled).'}
+            {directory?.provenanceMismatch ? (
+              <span className="ml-1 text-amber-200">
+                Live lookup is enabled but these rows are not live tenant data.
+              </span>
+            ) : null}
           </p>
 
           {results ? (
