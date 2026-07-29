@@ -51,6 +51,7 @@ import { runRbacGraphDirectoryTests } from './rbac-graph-directory-021d.selftest
 import { runRbacDirectoryPolicyTests } from './rbac-directory-policy-021e.selftest';
 import { runRbacPersistenceTests } from './rbac-persistence-021g.selftest';
 import { runRbacAsyncTests } from './rbac-async-021g2.selftest';
+import { runRbacPostgresStructureTests } from './rbac-postgres-021g3.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -263,6 +264,9 @@ async function main() {
 
   const rbacAsync = await runRbacAsyncTests();
   pass += rbacAsync.pass; fail += rbacAsync.fail; failures.push(...rbacAsync.failures);
+
+  const rbacPg = await runRbacPostgresStructureTests();
+  pass += rbacPg.pass; fail += rbacPg.fail; failures.push(...rbacPg.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {

@@ -161,8 +161,12 @@ export async function runRbacAsyncTests(): Promise<{ pass: number; fail: number;
       validateStoreConfiguration({ WATSON_RBAC_STORE: 'mysql' } as unknown as NodeJS.ProcessEnv).reasonCodes.includes('rbac_store_unknown'));
     const pg = validateStoreConfiguration({ WATSON_RBAC_STORE: 'postgres' } as unknown as NodeJS.ProcessEnv);
     check('selecting postgres without configuration fails closed', pg.ok === false);
-    check('postgres failure names the missing adapter, not a fallback',
-      pg.reasonCodes.includes('rbac_store_pg_adapter_unavailable'));
+    // 021G-3: the adapter now EXISTS, so the reason is no longer "no adapter" but
+    // "no configuration". What must not change is that it fails closed rather than
+    // reverting to JSON, which is what the next assertion pins.
+    check('postgres failure names the missing configuration, not a fallback',
+      pg.reasonCodes.includes('rbac_store_pg_host_missing') &&
+      !pg.reasonCodes.some((c) => /json|fallback/.test(c)), JSON.stringify(pg.reasonCodes));
     check('json configuration validates', validateStoreConfiguration({} as NodeJS.ProcessEnv).ok === true);
 
     // Provenance: honest about multi-instance safety, silent about connections.

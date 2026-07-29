@@ -10,12 +10,15 @@
 // process-local or legacy JSON state, because that is precisely how one worker
 // ends up disagreeing with another about who is an administrator.
 //
-// `postgres` is PREPARED here but deliberately INERT: selecting it without an
-// adapter (021G-3) fails configuration rather than pretending to be ready.
+// 021G-3: `postgres` is now REAL. Selecting it builds a PostgresRbacStore that
+// authenticates with a Microsoft Entra token from the App Service managed
+// identity. No branch in this file can produce a password, a connection string,
+// or a JSON fallback once postgres is selected.
 // ============================================================
 import type { RbacStoreAdapter, RbacStoreKind } from './persistence';
 import { JsonRbacStore } from './json-adapter';
 import { MemoryRbacStore } from './memory-adapter';
+import { PostgresRbacStore, managedIdentityTokenSource } from './postgres-adapter';
 
 export class StoreConfigurationError extends Error {}
 
@@ -43,14 +46,40 @@ export function validateStoreConfiguration(env: NodeJS.ProcessEnv = process.env)
 
   if (kind === 'postgres') {
     const reasons: string[] = [];
-    // 021G-3 will supply the adapter and these settings. Until then, selecting
-    // postgres is a configuration FAILURE rather than a silent JSON fallback.
     if (!env.WATSON_RBAC_PG_HOST?.trim()) reasons.push('rbac_store_pg_host_missing');
     if (!env.WATSON_RBAC_PG_DATABASE?.trim()) reasons.push('rbac_store_pg_database_missing');
-    reasons.push('rbac_store_pg_adapter_unavailable');
-    return { ok: false, kind, reasonCodes: reasons };
+    if (!env.WATSON_RBAC_PG_USER?.trim()) reasons.push('rbac_store_pg_user_missing');
+    // A password must NEVER be how this connects. If one is configured, that is a
+    // misconfiguration to refuse rather than honour: it would mean a secret is
+    // sitting in application settings where Entra authentication was the point.
+    if (env.WATSON_RBAC_PG_PASSWORD) reasons.push('rbac_store_pg_password_forbidden');
+    return { ok: reasons.length === 0, kind, reasonCodes: reasons };
   }
   return { ok: true, kind, reasonCodes: [] };
+}
+
+// Build the Postgres adapter from configuration. Separate from rbacStore() so the
+// configuration mapping is directly testable without touching the process-wide
+// singleton.
+export function buildPostgresStore(env: NodeJS.ProcessEnv = process.env): PostgresRbacStore {
+  const v = validateStoreConfiguration(env);
+  if (!v.ok) {
+    // The reason CODES are safe to surface; the values behind them are not, and
+    // are deliberately absent from this message.
+    throw new StoreConfigurationError(
+      `WATSON_RBAC_STORE=postgres is misconfigured: ${v.reasonCodes.join(', ')}`
+    );
+  }
+  return new PostgresRbacStore({
+    host: env.WATSON_RBAC_PG_HOST!.trim(),
+    port: Number(env.WATSON_RBAC_PG_PORT ?? 5432),
+    database: env.WATSON_RBAC_PG_DATABASE!.trim(),
+    user: env.WATSON_RBAC_PG_USER!.trim(),
+    // The ONLY credential path: a short-lived Entra token fetched per connection
+    // from the platform-assigned managed identity. Nothing is stored.
+    getAccessToken: managedIdentityTokenSource(env.WATSON_RBAC_PG_CLIENT_ID?.trim() || undefined),
+    ssl: true
+  });
 }
 
 // One adapter per process, anchored on globalThis so Next.js module duplication
@@ -61,13 +90,12 @@ const g = globalThis as unknown as { __watsonRbacAdapter?: RbacStoreAdapter };
 export function rbacStore(env: NodeJS.ProcessEnv = process.env): RbacStoreAdapter {
   if (g.__watsonRbacAdapter) return g.__watsonRbacAdapter;
   const kind = configuredStoreKind(env);
-  if (kind === 'postgres') {
-    // No adapter exists yet. Fail closed and loudly — never degrade to JSON.
-    throw new StoreConfigurationError(
-      'WATSON_RBAC_STORE=postgres is configured but the Postgres adapter is not available in this build.'
-    );
-  }
-  g.__watsonRbacAdapter = kind === 'memory' ? new MemoryRbacStore() : new JsonRbacStore();
+  // buildPostgresStore THROWS on misconfiguration. That is the whole point: an
+  // unusable shared store must stop RBAC, never degrade it to JSON.
+  g.__watsonRbacAdapter =
+    kind === 'postgres' ? buildPostgresStore(env)
+    : kind === 'memory' ? new MemoryRbacStore()
+    : new JsonRbacStore();
   return g.__watsonRbacAdapter;
 }
 
