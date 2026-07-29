@@ -49,6 +49,7 @@ import { runRbacUiTests } from './rbac-ui-021b.selftest';
 import { runRbacLocalBootstrapTests } from './rbac-local-bootstrap-021c1a.selftest';
 import { runRbacGraphDirectoryTests } from './rbac-graph-directory-021d.selftest';
 import { runRbacDirectoryPolicyTests } from './rbac-directory-policy-021e.selftest';
+import { runRbacPersistenceTests } from './rbac-persistence-021g.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -255,6 +256,9 @@ async function main() {
 
   const rbacDirectoryPolicy = await runRbacDirectoryPolicyTests();
   pass += rbacDirectoryPolicy.pass; fail += rbacDirectoryPolicy.fail; failures.push(...rbacDirectoryPolicy.failures);
+
+  const rbacPersistence = await runRbacPersistenceTests();
+  pass += rbacPersistence.pass; fail += rbacPersistence.fail; failures.push(...rbacPersistence.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {
