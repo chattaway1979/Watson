@@ -95,7 +95,7 @@ export class MemoryRbacStore implements RbacStoreAdapter {
     const before = this.assignments.map((a) => ({ ...a }));
     const auditBefore = this.audit.length;
     try {
-      if (this.inject.failAssignmentWrite) throw new Error('assignment');
+      if (this.inject.failAssignmentWrite || i.inject?.failAssignmentWrite) throw new Error('assignment');
       const existing = this.assignments.find((a) => a.targetOid === i.targetOid && a.role === i.role && a.active);
       if (existing) {
         // Idempotent: an already-held role never produces a second active row.
@@ -115,7 +115,7 @@ export class MemoryRbacStore implements RbacStoreAdapter {
         assignedAt: now, assignedByOid: i.actorOid, modifiedAt: now, modifiedByOid: i.actorOid,
         removedAt: null, removedByOid: null, version: 1
       });
-      if (this.inject.failAuditWrite) throw new Error('audit');
+      if (this.inject.failAuditWrite || i.inject?.failAuditWrite) throw new Error('audit');
       this.appendAuditSync({
         correlationId: i.correlationId, actorOid: i.actorOid, actorUpn: i.actorUpn,
         targetOid: i.targetOid, operation: 'assign_confirm', outcome: 'success',
@@ -161,11 +161,11 @@ export class MemoryRbacStore implements RbacStoreAdapter {
         });
         return { ok: false, reason: 'last_admin_protected' };
       }
-      if (this.inject.failAssignmentWrite) throw new Error('assignment');
+      if (this.inject.failAssignmentWrite || i.inject?.failAssignmentWrite) throw new Error('assignment');
       const now = new Date().toISOString();
       existing.active = false; existing.removedAt = now; existing.removedByOid = i.actorOid;
       existing.modifiedAt = now; existing.modifiedByOid = i.actorOid; existing.version += 1;
-      if (this.inject.failAuditWrite) throw new Error('audit');
+      if (this.inject.failAuditWrite || i.inject?.failAuditWrite) throw new Error('audit');
       this.appendAuditSync({
         correlationId: i.correlationId, actorOid: i.actorOid, actorUpn: i.actorUpn,
         targetOid: i.targetOid, operation: 'remove_confirm', outcome: 'success',

@@ -7,7 +7,7 @@ import { readRegistry } from '@/lib/it-agent/rbac/service';
 export const dynamic = 'force-dynamic';
 export async function GET(req: Request) {
   const actor = trustedIdentityFromHeaders(req.headers);
-  const r = readRegistry(actor);
+  const r = await readRegistry(actor);
   if (!r.ok) return NextResponse.json({ error: r.reason, ...messageFor(r.reason) }, { status: statusFor(r.reason), ...NO_STORE });
   return NextResponse.json({ roles: r.data }, NO_STORE);
 }

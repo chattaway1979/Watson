@@ -87,6 +87,13 @@ export type PreviewConsume =
   | { ok: true; record: PreviewRecord }
   | { ok: false; reason: PreviewConsumeFailure };
 
+// Test-only fault injection, carried through the contract so the atomicity
+// assertions exercise the REAL commit path rather than a mock of it.
+export interface AdapterFailureInjection {
+  failAssignmentWrite?: boolean;
+  failAuditWrite?: boolean;
+}
+
 export interface GrantInput {
   targetOid: string;
   targetDisplayName: string | null;
@@ -99,6 +106,7 @@ export interface GrantInput {
   elevatedAcknowledged: boolean | null;
   previousRoles: WatsonRoleKey[];
   resultingRoles: WatsonRoleKey[];
+  inject?: AdapterFailureInjection;
 }
 
 export interface RevokeInput {
@@ -110,6 +118,7 @@ export interface RevokeInput {
   elevatedAcknowledged: boolean | null;
   previousRoles: WatsonRoleKey[];
   resultingRoles: WatsonRoleKey[];
+  inject?: AdapterFailureInjection;
 }
 
 export interface MutationOutcome {

@@ -1,7 +1,7 @@
 /* ============================================================
  * Watson — 021C-1A : local RBAC bootstrap through the REAL request path.
  *
- * 021C-1 wired ensureBootstrap() into the request path, but browser validation
+ * 021C-1 wired (await ensureBootstrap()) into the request path, but browser validation
  * still landed on "You do not have permission to administer Watson roles."
  * The cause was not in the RBAC code: the self-test suite had been writing its
  * synthetic fixtures — INCLUDING ACTIVE watson_role_admin ASSIGNMENTS — into the
@@ -160,8 +160,8 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
   {
     // 2. The page path, with a bare local request, bootstraps the configured id.
     freshProcess();
-    check('no roles exist before the first request', currentRoles(BOOT).length === 0);
-    const first = authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv());
+    check('no roles exist before the first request', (await currentRoles(BOOT)).length === 0);
+    const first = (await authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv()));
     check('page path resolves the configured synthetic actor', first.actor?.oid === BOOT);
     check('page path authorizes the configured synthetic actor', first.authorized === true,
       lastBootstrapOutcome());
@@ -176,11 +176,11 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
 
     // 3. No stale empty-role result survives a successful bootstrap: the very
     //    same call that ran bootstrap must already see the role.
-    check('no stale empty-role state survives bootstrap', currentRoles(BOOT).length === 1);
+    check('no stale empty-role state survives bootstrap', (await currentRoles(BOOT)).length === 1);
 
     // 4. The capability is present on the NEXT request too (guard already set,
     //    so this request runs with bootstrap a no-op).
-    const second = authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv());
+    const second = (await authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv()));
     check('role-admin capabilities are present on the next request', second.authorized === true);
     check('second request creates no additional assignment',
       allAssignments().filter((a) => a.targetOid === BOOT && a.active).length === 1);
@@ -190,7 +190,7 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
       /authorizeRbacEntry/.test(pageSrc) && !/ensureBootstrap/.test(pageSrc));
     const entrySrc = readFileSync('src/lib/it-agent/rbac/entry.ts', 'utf8');
     check('the entry point bootstraps before resolving identity',
-      entrySrc.indexOf('ensureBootstrap(env)') < entrySrc.indexOf('trustedIdentityFromHeaders(headers'));
+      entrySrc.indexOf('(await ensureBootstrap(env))') < entrySrc.indexOf('trustedIdentityFromHeaders(headers'));
   }
 
   console.log('\n[106] RBAC local bootstrap — real API path and shared state');
@@ -198,7 +198,7 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
     // 5. The real route handlers, reading the real process env, must see the
     //    same assignment the page path created.
     freshProcess();
-    authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv());
+    (await authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv()));
 
     const seam = { WATSON_LOCAL_TEST_OID: BOOT, WATSON_RBAC_BOOTSTRAP_OID: BOOT };
     const regRes = await withProcessEnv(seam, () =>
@@ -221,12 +221,12 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
     // 6. Bootstrap and requireCapability read ONE store instance. Proven by
     //    mutating through the store module and observing the change through the
     //    service and route paths, with no reset in between.
-    check('service authorization agrees with the store immediately', readRegistry(idOf(BOOT)).ok === true);
+    check('service authorization agrees with the store immediately', (await readRegistry(idOf(BOOT))).ok === true);
     deactivateAssignment({ targetOid: BOOT, role: 'watson_role_admin', actorOid: 'system:test' });
     check('a store-level removal is seen by requireCapability at once',
-      readRegistry(idOf(BOOT)).ok === false);
+      (await readRegistry(idOf(BOOT))).ok === false);
     // 7. Page and routes share that same state — no per-layer copy.
-    const afterRemoval = authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv());
+    const afterRemoval = (await authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv()));
     check('page path sees the same removal the API path saw', afterRemoval.authorized === false);
     const regRes2 = await withProcessEnv(seam, () =>
       registryGET(new Request('http://localhost:3021/api/it-agent/rbac/registry')));
@@ -249,8 +249,8 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
     freshProcess();
     for (let i = 0; i < 5; i++) {
       __resetBootstrapGuardForTests();               // simulate a hot reload
-      authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv());
-      readRegistry(idOf(BOOT));                       // and an API request
+      (await authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv()));
+      (await readRegistry(idOf(BOOT)));                       // and an API request
     }
     check('hot reload and repeated requests never create a duplicate administrator',
       countActiveRoleAdmins() === 1, String(countActiveRoleAdmins()));
@@ -273,7 +273,7 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
     //     including one configured for a different identity.
     freshProcess();
     seedAdmin(OTHER);
-    const blocked = authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv());
+    const blocked = (await authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv()));
     check('existing active administrator prevents additional bootstrap',
       countActiveRoleAdmins() === 1 && activeRoles(BOOT).length === 0);
     check('configured identity is NOT granted access when an administrator exists',
@@ -286,16 +286,16 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
   {
     // 12. Mismatched local and bootstrap identities grant the LOCAL actor nothing.
     freshProcess();
-    const mismatched = authorizeRbacEntry(bareHeaders, 'rbac.registry.read',
-      devEnv({ WATSON_RBAC_BOOTSTRAP_OID: OTHER }));
+    const mismatched = (await authorizeRbacEntry(bareHeaders, 'rbac.registry.read',
+      devEnv({ WATSON_RBAC_BOOTSTRAP_OID: OTHER })));
     check('mismatched local and bootstrap OIDs do not grant access', mismatched.authorized === false);
     check('bootstrap still applies only to the CONFIGURED identity',
       activeRoles(OTHER).includes('watson_role_admin') && activeRoles(BOOT).length === 0);
 
     // 13. No bootstrap configuration -> no administrator, no first-user-wins.
     freshProcess();
-    const noBoot = authorizeRbacEntry(bareHeaders, 'rbac.registry.read',
-      devEnv({ WATSON_RBAC_BOOTSTRAP_OID: undefined }));
+    const noBoot = (await authorizeRbacEntry(bareHeaders, 'rbac.registry.read',
+      devEnv({ WATSON_RBAC_BOOTSTRAP_OID: undefined })));
     check('missing bootstrap OID does not grant access', noBoot.authorized === false);
     check('missing bootstrap OID creates no administrator at all', countActiveRoleAdmins() === 0);
     check('missing configuration is reported as not-configured',
@@ -314,8 +314,8 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
     let invalidGranted = 0, invalidAdmins = 0;
     for (const v of bad) {
       freshProcess();
-      const r = authorizeRbacEntry(bareHeaders, 'rbac.registry.read',
-        devEnv({ WATSON_RBAC_BOOTSTRAP_OID: v, WATSON_LOCAL_TEST_OID: v }));
+      const r = (await authorizeRbacEntry(bareHeaders, 'rbac.registry.read',
+        devEnv({ WATSON_RBAC_BOOTSTRAP_OID: v, WATSON_LOCAL_TEST_OID: v })));
       if (r.authorized) invalidGranted++;
       if (countActiveRoleAdmins() !== 0) invalidAdmins++;
     }
@@ -326,8 +326,8 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
     // configuration still matches the resolved identity rather than silently
     // producing an administrator nobody can use.
     freshProcess();
-    const upper = authorizeRbacEntry(bareHeaders, 'rbac.registry.read',
-      devEnv({ WATSON_RBAC_BOOTSTRAP_OID: BOOT.toUpperCase(), WATSON_LOCAL_TEST_OID: BOOT.toUpperCase() }));
+    const upper = (await authorizeRbacEntry(bareHeaders, 'rbac.registry.read',
+      devEnv({ WATSON_RBAC_BOOTSTRAP_OID: BOOT.toUpperCase(), WATSON_LOCAL_TEST_OID: BOOT.toUpperCase() })));
     check('object ids are normalised identically by bootstrap and identity resolution',
       upper.authorized === true && upper.actor?.oid === BOOT);
   }
@@ -336,15 +336,15 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
   {
     // 15. Nothing the browser sends can change who the actor is.
     freshProcess();
-    const hostile = authorizeRbacEntry(hostileHeaders(OTHER), 'rbac.registry.read', devEnv());
+    const hostile = (await authorizeRbacEntry(hostileHeaders(OTHER), 'rbac.registry.read', devEnv()));
     check('a forged principal header cannot replace the configured local actor',
       hostile.actor?.oid === BOOT, hostile.actor?.oid ?? 'null');
     check('cookies and role headers cannot elevate the actor',
       same(hostile.roles, ['watson_role_admin']) && activeRoles(OTHER).length === 0);
 
     freshProcess();
-    const hostileNoSeam = authorizeRbacEntry(hostileHeaders(OTHER), 'rbac.registry.read',
-      devEnv({ WATSON_LOCAL_TEST_OID: undefined, WATSON_RBAC_BOOTSTRAP_OID: undefined }));
+    const hostileNoSeam = (await authorizeRbacEntry(hostileHeaders(OTHER), 'rbac.registry.read',
+      devEnv({ WATSON_LOCAL_TEST_OID: undefined, WATSON_RBAC_BOOTSTRAP_OID: undefined })));
     check('with no seam and no bootstrap, a forged principal is still not an administrator',
       hostileNoSeam.authorized === false && countActiveRoleAdmins() === 0);
 
@@ -358,7 +358,10 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
     // Probe the CODE of runBootstrap, with prose stripped, so a comment that
     // merely mentions requests cannot make this pass or fail spuriously.
     const bootstrapCode = svcSrc
-      .slice(svcSrc.indexOf('export function runBootstrap'), svcSrc.indexOf('export function ensureBootstrap'))
+      // 021G-2: these became async. Anchoring on the exact old signature made
+      // indexOf return -1 and silently slice the wrong region, so the probe
+      // stopped testing what it claimed to.
+      .slice(svcSrc.indexOf('export async function runBootstrap'), svcSrc.indexOf('export async function ensureBootstrap'))
       .split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
     check('bootstrap reads the environment and nothing else',
       /env\.WATSON_RBAC_BOOTSTRAP_OID/.test(bootstrapCode)
@@ -366,7 +369,7 @@ export async function runRbacLocalBootstrapTests(): Promise<{ pass: number; fail
 
     // 16. Production ignores the local seam entirely.
     freshProcess();
-    const prod = authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv({ NODE_ENV: 'production' }));
+    const prod = (await authorizeRbacEntry(bareHeaders, 'rbac.registry.read', devEnv({ NODE_ENV: 'production' })));
     check('production mode resolves no synthetic actor', prod.actor === null);
     check('production mode refuses the unauthenticated request', prod.authorized === false);
     check('production seam is inert even with both variables set',

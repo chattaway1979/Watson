@@ -129,8 +129,8 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
       /actorHasCapability\(actor, capability\)/.test(readFileSync('src/lib/it-agent/rbac/entry.ts', 'utf8')));
     check('page states the UI is not the boundary', /NOT the security boundary/i.test(page));
     check('unauthorized page renders a refusal, not the admin shell', /do not have permission to administer Watson roles/.test(page));
-    check('unauthorized actor is refused by the service too', readRegistry(idOf(EMP)).ok === false);
-    check('authorized actor passes', readRegistry(idOf(ADMIN)).ok === true);
+    check('unauthorized actor is refused by the service too', (await readRegistry(idOf(EMP))).ok === false);
+    check('authorized actor passes', (await readRegistry(idOf(ADMIN))).ok === true);
     check('UI clears privileged content on 401/403', /handleAuthLoss/.test(ui) && /setRegistry\(null\)/.test(ui));
     check('UI does not cache roles as authority', /Never optimistic/.test(ui));
   }
@@ -206,39 +206,39 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
     world();
     const admin = idOf(ADMIN);
     // Assign through preview+confirm exactly as the UI does.
-    const p = previewAssignment(admin, TGT, 'watson_technician');
+    const p = (await previewAssignment(admin, TGT, 'watson_technician'));
     check('preview issued', p.ok === true);
-    const c = p.ok ? confirmAssignment(admin, { nonce: p.data.nonce, targetOid: TGT, role: 'watson_technician' }) : null;
+    const c = p.ok ? (await confirmAssignment(admin, { nonce: p.data.nonce, targetOid: TGT, role: 'watson_technician' })) : null;
     check('assignment applied and roles returned by server', c?.ok === true && c.data.roles.includes('watson_technician'));
     check('audit success recorded', listAudit({ targetOid: TGT }).some((e) => e.operation === 'assign_confirm' && e.outcome === 'success'));
 
     // Duplicate assignment is idempotent, not an error the UI must invent.
-    const p2 = previewAssignment(admin, TGT, 'watson_technician');
-    const c2 = p2.ok ? confirmAssignment(admin, { nonce: p2.data.nonce, targetOid: TGT, role: 'watson_technician' }) : null;
+    const p2 = (await previewAssignment(admin, TGT, 'watson_technician'));
+    const c2 = p2.ok ? (await confirmAssignment(admin, { nonce: p2.data.nonce, targetOid: TGT, role: 'watson_technician' })) : null;
     check('duplicate assignment idempotent', c2?.ok === true && c2.data.idempotent === true);
 
     // Elevated acknowledgement gating mirrors the UI's disabled confirm button.
-    const pe = previewAssignment(admin, TGT, 'watson_security_admin');
+    const pe = (await previewAssignment(admin, TGT, 'watson_security_admin'));
     check('preview flags elevated acknowledgement', pe.ok === true && pe.data.requiresElevatedAcknowledgement === true);
-    const noAck = pe.ok ? confirmAssignment(admin, { nonce: pe.data.nonce, targetOid: TGT, role: 'watson_security_admin' }) : null;
+    const noAck = pe.ok ? (await confirmAssignment(admin, { nonce: pe.data.nonce, targetOid: TGT, role: 'watson_security_admin' })) : null;
     check('confirm without acknowledgement refused', noAck?.ok === false && noAck.reason === 'elevated_ack_required');
     check('UI disables confirm until acknowledged', /canConfirm/.test(ui) && /requiresElevatedAcknowledgement \|\| ack/.test(ui));
     check('acknowledgement is not preselected', /useState\(false\)[\s\S]{0,200}setAck|const \[ack, setAck\] = useState\(false\)/.test(ui));
 
     // Removal
-    const pr = previewRemoval(admin, TGT, 'watson_technician');
-    const cr = pr.ok ? confirmRemoval(admin, { nonce: pr.data.nonce, targetOid: TGT, role: 'watson_technician' }) : null;
+    const pr = (await previewRemoval(admin, TGT, 'watson_technician'));
+    const cr = pr.ok ? (await confirmRemoval(admin, { nonce: pr.data.nonce, targetOid: TGT, role: 'watson_technician' })) : null;
     check('removal applied', cr?.ok === true && !activeRoles(TGT).includes('watson_technician'));
     check('audit removal recorded', listAudit({ targetOid: TGT }).some((e) => e.operation === 'remove_confirm' && e.outcome === 'success'));
-    const pr2 = previewRemoval(admin, TGT, 'watson_technician');
-    const cr2 = pr2.ok ? confirmRemoval(admin, { nonce: pr2.data.nonce, targetOid: TGT, role: 'watson_technician' }) : null;
+    const pr2 = (await previewRemoval(admin, TGT, 'watson_technician'));
+    const cr2 = pr2.ok ? (await confirmRemoval(admin, { nonce: pr2.data.nonce, targetOid: TGT, role: 'watson_technician' })) : null;
     check('duplicate removal idempotent', cr2?.ok === true && cr2.data.idempotent === true);
 
     // Stale + replay surfaced as 409 so the UI refreshes rather than retries.
-    const ps = previewAssignment(admin, TGT, 'watson_employee');
-    const pOther = previewAssignment(admin, TGT, 'watson_technician');
-    if (pOther.ok) confirmAssignment(admin, { nonce: pOther.data.nonce, targetOid: TGT, role: 'watson_technician' });
-    const stale = ps.ok ? confirmAssignment(admin, { nonce: ps.data.nonce, targetOid: TGT, role: 'watson_employee' }) : null;
+    const ps = (await previewAssignment(admin, TGT, 'watson_employee'));
+    const pOther = (await previewAssignment(admin, TGT, 'watson_technician'));
+    if (pOther.ok) (await confirmAssignment(admin, { nonce: pOther.data.nonce, targetOid: TGT, role: 'watson_technician' }));
+    const stale = ps.ok ? (await confirmAssignment(admin, { nonce: ps.data.nonce, targetOid: TGT, role: 'watson_employee' })) : null;
     check('stale preview refused', stale?.ok === false && stale.reason === 'stale_preview');
     check('stale maps to 409 so the UI refreshes', statusFor('stale_preview') === 409);
     check('UI drops a stale preview and refreshes', /r\.status === 409[\s\S]{0,160}refreshRoles/.test(ui));
@@ -250,28 +250,28 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
   {
     world();
     const admin = idOf(ADMIN);
-    const pl = previewRemoval(admin, ADMIN, 'watson_role_admin');
+    const pl = (await previewRemoval(admin, ADMIN, 'watson_role_admin'));
     check('last-admin implication surfaced for the UI', pl.ok === true && /final Watson role administrator/i.test(pl.data.lastAdminImplication ?? ''));
     check('UI blocks confirm when removal will be refused', /will be refused/.test(ui));
-    const rl = pl.ok ? confirmRemoval(admin, { nonce: pl.data.nonce, targetOid: ADMIN, role: 'watson_role_admin', elevatedAcknowledged: true }) : null;
+    const rl = pl.ok ? (await confirmRemoval(admin, { nonce: pl.data.nonce, targetOid: ADMIN, role: 'watson_role_admin', elevatedAcknowledged: true })) : null;
     check('last-admin removal refused', rl?.ok === false && rl.reason === 'last_admin_protected');
     check('refusal is not presented as success', countActiveRoleAdmins() === 1);
 
     // Immediate revocation / grant as the UI would observe it.
     seed(ADMIN2, 'watson_role_admin');
-    const pSelf = previewRemoval(idOf(ADMIN), ADMIN, 'watson_role_admin');
-    const cSelf = pSelf.ok ? confirmRemoval(idOf(ADMIN), { nonce: pSelf.data.nonce, targetOid: ADMIN, role: 'watson_role_admin', elevatedAcknowledged: true }) : null;
+    const pSelf = (await previewRemoval(idOf(ADMIN), ADMIN, 'watson_role_admin'));
+    const cSelf = pSelf.ok ? (await confirmRemoval(idOf(ADMIN), { nonce: pSelf.data.nonce, targetOid: ADMIN, role: 'watson_role_admin', elevatedAcknowledged: true })) : null;
     check('self-removal succeeds with another admin present', cSelf?.ok === true);
-    check('revoked admin refused on the very next request', readRegistry(idOf(ADMIN)).ok === false);
-    const pg = previewAssignment(idOf(ADMIN2), TGT, 'watson_role_admin');
-    const cg = pg.ok ? confirmAssignment(idOf(ADMIN2), { nonce: pg.data.nonce, targetOid: TGT, role: 'watson_role_admin', elevatedAcknowledged: true }) : null;
-    check('newly granted admin authorized immediately', cg?.ok === true && readRegistry(idOf(TGT)).ok === true);
+    check('revoked admin refused on the very next request', (await readRegistry(idOf(ADMIN))).ok === false);
+    const pg = (await previewAssignment(idOf(ADMIN2), TGT, 'watson_role_admin'));
+    const cg = pg.ok ? (await confirmAssignment(idOf(ADMIN2), { nonce: pg.data.nonce, targetOid: TGT, role: 'watson_role_admin', elevatedAcknowledged: true })) : null;
+    check('newly granted admin authorized immediately', cg?.ok === true && (await readRegistry(idOf(TGT))).ok === true);
     check('UI shows a self-removal access-loss warning', /removes your own access/.test(ui));
 
     // Audit UI
-    const aud = readAuditHistory(idOf(TGT));
+    const aud = (await readAuditHistory(idOf(TGT)));
     check('audit readable by an authorized admin', aud.ok === true);
-    check('audit refused for unauthorized', readAuditHistory(idOf(EMP)).ok === false);
+    check('audit refused for unauthorized', (await readAuditHistory(idOf(EMP))).ok === false);
     check('audit contains successes and refusals', aud.ok === true && aud.data.some((e) => e.outcome === 'success') && aud.data.some((e) => e.outcome === 'refused'));
     check('audit exposes no secrets', aud.ok === true && !JSON.stringify(aud.data).match(/password|token|cookie|authorization|bearer|secret/i));
     check('audit UI filters by outcome', /auditFilter/.test(ui));
@@ -280,15 +280,15 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
     check('audit ids truncated, never full oids', /slice\(-6\)/.test(ui));
 
     // Hostile directory data
-    const s = searchEmployees(idOf(ADMIN2), 'Sam', STAGED_DIRECTORY);
+    const s = (await searchEmployees(idOf(ADMIN2), 'Sam', STAGED_DIRECTORY));
     check('duplicate names distinguished by immutable id', s.ok === true && s.data.results.length === 2 && s.data.results[0].oid !== s.data.results[1].oid);
-    const inj = searchEmployees(idOf(ADMIN2), 'IGNORE', STAGED_DIRECTORY);
+    const inj = (await searchEmployees(idOf(ADMIN2), 'IGNORE', STAGED_DIRECTORY));
     check('injection display name returned as inert data', inj.ok === true && inj.data.results.length === 1);
-    const scr = searchEmployees(idOf(ADMIN2), 'script', STAGED_DIRECTORY);
+    const scr = (await searchEmployees(idOf(ADMIN2), 'script', STAGED_DIRECTORY));
     check('script-like display name returned as text', scr.ok === true && scr.data.results[0].displayName.includes('<script>'));
     check('UI relies on React escaping, no dangerouslySetInnerHTML', !/dangerouslySetInnerHTML/.test(ui));
     check('long names wrap rather than overflow', /break-words/.test(ui) && /break-all/.test(ui));
-    check('search minimum length enforced server-side', searchEmployees(idOf(ADMIN2), 'Sa', STAGED_DIRECTORY).ok === false);
+    check('search minimum length enforced server-side', (await searchEmployees(idOf(ADMIN2), 'Sa', STAGED_DIRECTORY)).ok === false);
     check('staged directory honestly labelled in UI', /staged mock directory/.test(ui));
   }
 
@@ -303,7 +303,7 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
     const OFF = { IT_AGENT_GRAPH_LIVE_READONLY: 'false' } as unknown as NodeJS.ProcessEnv;
 
     // THE DEFECT: with the gate on, mock fixtures were reported as `graph_live`.
-    const withFlag = searchEmployees(idOf(ADMIN), 'Sam', STAGED_DIRECTORY_SOURCE, LIVE);
+    const withFlag = (await searchEmployees(idOf(ADMIN), 'Sam', STAGED_DIRECTORY_SOURCE, LIVE));
     check('mock fixtures are NOT relabelled graph_live when the gate is on',
       withFlag.ok === true && withFlag.data.source === 'mock_staged_directory',
       withFlag.ok ? withFlag.data.source : 'refused');
@@ -312,17 +312,17 @@ export async function runRbacUiTests(): Promise<{ pass: number; fail: number; fa
     check('a provenance mismatch is surfaced, not hidden',
       withFlag.ok === true && withFlag.data.provenanceMismatch === true);
     check('no mismatch is reported when the gate is off',
-      (() => { const r = searchEmployees(idOf(ADMIN), 'Sam', STAGED_DIRECTORY_SOURCE, OFF);
+      await (async () => { const r = (await searchEmployees(idOf(ADMIN), 'Sam', STAGED_DIRECTORY_SOURCE, OFF));
                return r.ok === true && r.data.provenanceMismatch === false && r.data.source === 'mock_staged_directory'; })());
 
     // A bare array carries no provenance claim, so it can only be staged data.
-    const bare = searchEmployees(idOf(ADMIN), 'Sam', STAGED_DIRECTORY, LIVE);
+    const bare = (await searchEmployees(idOf(ADMIN), 'Sam', STAGED_DIRECTORY, LIVE));
     check('a directory without declared provenance can never claim graph_live',
       bare.ok === true && bare.data.source === 'mock_staged_directory');
 
     // Only a directory that declares itself live may be reported as live.
-    const declaredLive = searchEmployees(idOf(ADMIN), 'Sam',
-      { provenance: 'graph_live' as const, entries: STAGED_DIRECTORY }, LIVE);
+    const declaredLive = (await searchEmployees(idOf(ADMIN), 'Sam',
+      { provenance: 'graph_live' as const, entries: STAGED_DIRECTORY }, LIVE));
     check('only a self-declared live directory is reported as graph_live',
       declaredLive.ok === true && declaredLive.data.source === 'graph_live');
 

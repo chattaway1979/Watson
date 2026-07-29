@@ -17,7 +17,7 @@ export default async function AccessAndRolesPage() {
   const h = await headers();
   // 021C-1A: the bootstrap -> identity -> capability sequence lives in one
   // shared, tested module so the page and the RBAC routes cannot drift apart.
-  const { actor, authorized, roles } = authorizeRbacEntry(h, 'rbac.registry.read');
+  const { actor, authorized, roles } = await authorizeRbacEntry(h, 'rbac.registry.read');
 
   if (!authorized) {
     return (

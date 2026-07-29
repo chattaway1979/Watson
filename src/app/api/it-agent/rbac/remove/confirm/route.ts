@@ -9,7 +9,7 @@ export async function POST(req: Request) {
   const actor = trustedIdentityFromHeaders(req.headers);
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   // NOTE: the body never supplies the actor. Identity comes from the platform.
-  const r = confirmRemoval(actor, { nonce: body.nonce, targetOid: body.targetOid, role: body.role, elevatedAcknowledged: body.elevatedAcknowledged });
+  const r = await confirmRemoval(actor, { nonce: body.nonce, targetOid: body.targetOid, role: body.role, elevatedAcknowledged: body.elevatedAcknowledged });
   if (!r.ok) return NextResponse.json({ error: r.reason, ...messageFor(r.reason) }, { status: statusFor(r.reason), ...NO_STORE });
   return NextResponse.json(r.data, NO_STORE);
 }

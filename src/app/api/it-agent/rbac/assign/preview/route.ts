@@ -9,7 +9,7 @@ export async function POST(req: Request) {
   const actor = trustedIdentityFromHeaders(req.headers);
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   // NOTE: the body never supplies the actor. Identity comes from the platform.
-  const r = previewAssignment(actor, body.targetOid, body.role, typeof body.displayName === 'string' ? body.displayName : null);
+  const r = await previewAssignment(actor, body.targetOid, body.role, typeof body.displayName === 'string' ? body.displayName : null);
   if (!r.ok) return NextResponse.json({ error: r.reason, ...messageFor(r.reason) }, { status: statusFor(r.reason), ...NO_STORE });
   return NextResponse.json(r.data, NO_STORE);
 }

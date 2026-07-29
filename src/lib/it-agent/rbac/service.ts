@@ -19,11 +19,12 @@ import {
   sodWarnings, requiresElevatedAcknowledgement, canRoleAssign, canRoleRemove,
   type WatsonRoleKey, type Capability
 } from './roles';
-import {
-  activeRoles, findActive, countActiveRoleAdmins, roleStateVersion,
-  commitAtomically, writeRbacAudit, upsertActiveAssignment, deactivateAssignment,
-  listAudit, type AssignmentSource, type FailureInjection
-} from './store';
+import { type AssignmentSource, type FailureInjection, type RbacAuditEvent } from './store';
+// 021G-2: ALL stateful RBAC access now goes through the async persistence
+// contract. The service no longer touches the JSON store directly, so swapping
+// in the Postgres adapter (021G-3) requires no change here.
+import { rbacStore } from './store-provider';
+import { digestNonce, generateNonce, type PreviewRecord } from './persistence';
 
 // ------------------------------------------------------------
 // Trusted identity. Produced ONLY from platform-validated Entra claims.
@@ -64,7 +65,8 @@ export type RefusalReason =
   | 'actor_mismatch' | 'target_mismatch' | 'role_mismatch' | 'elevated_ack_required'
   | 'malformed_payload' | 'target_not_found' | 'persistence_failure' | 'audit_failure'
   | 'not_assignable' | 'not_removable' | 'self_assignment_forbidden'
-  | 'directory_unavailable';
+  | 'directory_unavailable'
+  | 'store_unavailable';
 
 export type Result<T> =
   | { ok: true; data: T }
@@ -79,14 +81,14 @@ function hash(s: string): number {
   let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h;
 }
 
-function audit(input: {
+async function audit(input: {
   actor: TrustedIdentity | null; targetOid: string | null; operation: string;
   outcome: 'success' | 'refused' | 'error'; reason: string;
   previousRoles?: WatsonRoleKey[] | null; resultingRoles?: WatsonRoleKey[] | null;
   source?: AssignmentSource | 'system'; elevatedAcknowledged?: boolean | null;
   correlationId?: string;
-}) {
-  writeRbacAudit({
+}): Promise<void> {
+  await rbacStore().appendAudit({
     correlationId: input.correlationId ?? correlation(),
     // Server-resolved actor only. A request body can never influence this.
     actorOid: input.actor?.oid ?? 'anonymous',
@@ -106,26 +108,37 @@ function audit(input: {
 // Authorization primitives — always read CURRENT durable state, so a revoked
 // administrator loses access on the very next request.
 // ------------------------------------------------------------
-export function currentRoles(oid: string): WatsonRoleKey[] {
-  return activeRoles(oid);
+export async function currentRoles(oid: string): Promise<WatsonRoleKey[]> {
+  return rbacStore().activeRoles(oid);
 }
 
-export function actorHasCapability(actor: TrustedIdentity, cap: Capability): boolean {
-  return capabilitiesFor(currentRoles(actor.oid)).includes(cap);
+// Returns a Promise. Every call site MUST await it: a bare Promise is truthy, so
+// forgetting the await would grant access unconditionally. The async signature
+// is what makes TypeScript reject the unawaited form at every call site.
+export async function actorHasCapability(actor: TrustedIdentity, cap: Capability): Promise<boolean> {
+  return capabilitiesFor(await currentRoles(actor.oid)).includes(cap);
 }
 
-function requireCapability(
+async function requireCapability(
   actor: TrustedIdentity | null, cap: Capability, operation: string, targetOid: string | null
-): Result<TrustedIdentity> {
+): Promise<Result<TrustedIdentity>> {
   // Every privileged operation passes through here, so this is the one place
   // bootstrap needs to be attempted.
-  ensureBootstrap();
+  await ensureBootstrap();
   if (!actor) {
-    audit({ actor: null, targetOid, operation, outcome: 'refused', reason: 'unauthenticated' });
+    await audit({ actor: null, targetOid, operation, outcome: 'refused', reason: 'unauthenticated' });
     return refuse('unauthenticated');
   }
-  if (!actorHasCapability(actor, cap)) {
-    audit({ actor, targetOid, operation, outcome: 'refused', reason: 'not_authorized' });
+  // A store failure must NOT read as "not authorized" and must never read as
+  // authorized: it propagates as an explicit unavailable result.
+  let allowed: boolean;
+  try {
+    allowed = await actorHasCapability(actor, cap);
+  } catch {
+    return refuse('store_unavailable');
+  }
+  if (!allowed) {
+    await audit({ actor, targetOid, operation, outcome: 'refused', reason: 'not_authorized' });
     return refuse('not_authorized');
   }
   return { ok: true, data: actor };
@@ -154,18 +167,14 @@ export type BootstrapOutcome =
 
 interface RbacGlobals {
   bootstrapAttempted: boolean;
+  bootstrapInFlight?: Promise<void>;
   bootstrapOutcome: BootstrapOutcome;
-  previews: Map<string, PendingPreview>;
 }
 
 function rbacGlobals(): RbacGlobals {
   const g = globalThis as unknown as { __watsonRbacRuntime?: RbacGlobals };
   if (!g.__watsonRbacRuntime) {
-    g.__watsonRbacRuntime = {
-      bootstrapAttempted: false,
-      bootstrapOutcome: 'not_attempted',
-      previews: new Map<string, PendingPreview>()
-    };
+    g.__watsonRbacRuntime = { bootstrapAttempted: false, bootstrapOutcome: 'not_attempted' };
   }
   return g.__watsonRbacRuntime;
 }
@@ -182,10 +191,10 @@ export interface BootstrapPosture {
   bootstrapWouldApply: boolean;
 }
 
-export function bootstrapPosture(env: NodeJS.ProcessEnv = process.env): BootstrapPosture {
+export async function bootstrapPosture(env: NodeJS.ProcessEnv = process.env): Promise<BootstrapPosture> {
   const oid = env.WATSON_RBAC_BOOTSTRAP_OID?.trim() ?? '';
   const configured = Boolean(oid) && OID_SHAPE.test(oid);
-  const persistentAdminExists = countActiveRoleAdmins() > 0;
+  const persistentAdminExists = (await rbacStore().countActiveRoleAdmins()) > 0;
   return {
     configured,
     hasImmutableOid: configured,
@@ -197,33 +206,20 @@ export function bootstrapPosture(env: NodeJS.ProcessEnv = process.env): Bootstra
 // Bootstrap runs from SERVER CONFIGURATION ONLY. There is no request parameter,
 // header, cookie or body field that can reach it, and it is a no-op once any
 // persistent role administrator exists.
-export function runBootstrap(env: NodeJS.ProcessEnv = process.env): Result<{ applied: boolean; reason: string }> {
+export async function runBootstrap(env: NodeJS.ProcessEnv = process.env): Promise<Result<{ applied: boolean; reason: string }>> {
   const raw = env.WATSON_RBAC_BOOTSTRAP_OID?.trim() ?? '';
   if (!raw || !OID_SHAPE.test(raw)) {
     // Covers both "not set" and "set but not a well-formed immutable object id".
     // A malformed value is never normalised into something usable.
-    audit({ actor: null, targetOid: null, operation: 'bootstrap', outcome: 'refused', reason: 'bootstrap_not_configured', source: 'bootstrap' });
+    await audit({ actor: null, targetOid: null, operation: 'bootstrap', outcome: 'refused', reason: 'bootstrap_not_configured', source: 'bootstrap' });
     return { ok: true, data: { applied: false, reason: 'bootstrap_not_configured' } };
   }
-  if (countActiveRoleAdmins() > 0) {
-    // Never silently create a second administrator.
-    audit({ actor: null, targetOid: raw.toLowerCase(), operation: 'bootstrap', outcome: 'refused', reason: 'persistent_admin_exists', source: 'bootstrap' });
-    return { ok: true, data: { applied: false, reason: 'persistent_admin_exists' } };
-  }
   const oid = raw.toLowerCase();
-  const commit = commitAtomically(
-    () => upsertActiveAssignment({
-      targetOid: oid, targetDisplayName: null, targetUpn: null,
-      role: 'watson_role_admin', source: 'bootstrap', actorOid: 'system:bootstrap'
-    }),
-    {
-      correlationId: correlation(), actorOid: 'system:bootstrap', actorUpn: null, targetOid: oid,
-      operation: 'bootstrap', outcome: 'success', reason: 'bootstrap_role_admin_created',
-      previousRoles: [], resultingRoles: ['watson_role_admin'], source: 'bootstrap', elevatedAcknowledged: null
-    }
-  );
-  if (!commit.ok) return refuse('persistence_failure');
-  return { ok: true, data: { applied: true, reason: 'bootstrap_role_admin_created' } };
+  // Count-and-create happen inside ONE adapter call, so concurrent
+  // initialization cannot create two bootstrap records.
+  const r = await rbacStore().tryBootstrap(oid, correlation());
+  if (!r.ok) return refuse('persistence_failure');
+  return { ok: true, data: { applied: r.data.applied, reason: r.data.reason } };
 }
 
 // Idempotent bootstrap guard, invoked at the top of every RBAC entry point.
@@ -240,21 +236,26 @@ export function runBootstrap(env: NodeJS.ProcessEnv = process.env): Result<{ app
 // that bootstrap had deliberately no-opped because the store already contained an
 // active role administrator. The recorded value is a fixed category from a closed
 // vocabulary — never an object id, claim, cookie, token or secret.
-export function ensureBootstrap(env: NodeJS.ProcessEnv = process.env): void {
+export async function ensureBootstrap(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const g = rbacGlobals();
+  // A single in-flight promise is shared, so concurrent first requests await the
+  // SAME initialization rather than each starting their own.
+  if (g.bootstrapInFlight) return g.bootstrapInFlight;
   if (g.bootstrapAttempted) return;
-  g.bootstrapAttempted = true;
-  try {
-    const r = runBootstrap(env);
-    g.bootstrapOutcome = r.ok
-      ? (r.data.reason as BootstrapOutcome)
-      : 'bootstrap_persistence_failure';
-  } catch {
-    // Bootstrap must never break a request — but it must not vanish either.
-    g.bootstrapOutcome = 'bootstrap_error';
-  }
-  // Safe, category-only, emitted once per process.
-  console.info(`[watson][rbac] bootstrap outcome: ${g.bootstrapOutcome}`);
+  g.bootstrapInFlight = (async () => {
+    try {
+      const r = await runBootstrap(env);
+      g.bootstrapOutcome = r.ok ? (r.data.reason as BootstrapOutcome) : 'bootstrap_persistence_failure';
+    } catch {
+      // Bootstrap must never break a request — but it must not vanish either.
+      g.bootstrapOutcome = 'bootstrap_error';
+    }
+    g.bootstrapAttempted = true;
+    g.bootstrapInFlight = undefined;
+    // Safe, category-only, emitted once per process.
+    console.info(`[watson][rbac] bootstrap outcome: ${g.bootstrapOutcome}`);
+  })();
+  return g.bootstrapInFlight;
 }
 
 // Diagnostic accessor. Reports the category only; the configured object id is
@@ -266,6 +267,7 @@ export function lastBootstrapOutcome(): BootstrapOutcome {
 export function __resetBootstrapGuardForTests(): void {
   const g = rbacGlobals();
   g.bootstrapAttempted = false;
+  g.bootstrapInFlight = undefined;
   g.bootstrapOutcome = 'not_attempted';
 }
 
@@ -293,18 +295,15 @@ export interface RolePreview {
   disclaimer: string;
 }
 
-interface PendingPreview extends RolePreview { consumed: boolean; issuedAt: number }
-// Process-wide, for the same reason as the bootstrap guard: a preview issued by
-// one module copy must be consumable by another. A module-local Map made
-// preview -> confirm fail as `stale_preview` whenever the two requests happened
-// to be served by different copies of this module.
-const PREVIEWS = rbacGlobals().previews;
+// 021G-2: previews now live in the persistence adapter, keyed by a SHA-256
+// DIGEST of the nonce. The raw nonce is returned to the caller once and never
+// stored, and the binding + single-use check + consumption happen in ONE atomic
+// adapter call — the caller cannot read-then-consume-then-mutate as steps.
 const PREVIEW_TTL_MS = 10 * 60 * 1000;
 
-export function __resetPreviewsForTests(): void { PREVIEWS.clear(); }
-
-function issueNonce(): string {
-  return 'nonce-' + Math.abs(hash(String(PREVIEWS.size) + Math.random() + Date.now())).toString(36);
+export function __resetPreviewsForTests(): void {
+  const store = rbacStore() as unknown as { __resetPreviewsForTests?: () => void; reset?: () => void };
+  store.__resetPreviewsForTests?.();
 }
 
 function validTarget(oid: unknown): string | null {
@@ -313,86 +312,87 @@ function validTarget(oid: unknown): string | null {
   return OID_SHAPE.test(v) ? v : null;
 }
 
-export function previewAssignment(
+export async function previewAssignment(
   actor: TrustedIdentity | null, targetOidRaw: unknown, roleRaw: unknown,
   targetDisplayName: string | null = null, targetUpn: string | null = null
-): Result<RolePreview> {
-  const gate = requireCapability(actor, 'rbac.assign', 'assign_preview', validTarget(targetOidRaw));
+): Promise<Result<RolePreview>> {
+  const gate = await requireCapability(actor, 'rbac.assign', 'assign_preview', validTarget(targetOidRaw));
   if (!gate.ok) return gate as Result<RolePreview>;
   const a = gate.data;
 
   if (!isWatsonRoleKey(roleRaw)) {
-    audit({ actor: a, targetOid: validTarget(targetOidRaw), operation: 'assign_preview', outcome: 'refused', reason: 'unknown_role' });
+    await audit({ actor: a, targetOid: validTarget(targetOidRaw), operation: 'assign_preview', outcome: 'refused', reason: 'unknown_role' });
     return refuse('unknown_role');
   }
   const target = validTarget(targetOidRaw);
   if (!target) {
-    audit({ actor: a, targetOid: null, operation: 'assign_preview', outcome: 'refused', reason: 'invalid_target' });
+    await audit({ actor: a, targetOid: null, operation: 'assign_preview', outcome: 'refused', reason: 'invalid_target' });
     return refuse('invalid_target');
   }
   // Self-elevation is refused structurally, before any policy nuance.
   if (target === a.oid && !WATSON_ROLES[roleRaw].selfAssignable) {
-    audit({ actor: a, targetOid: target, operation: 'assign_preview', outcome: 'refused', reason: 'self_elevation' });
+    await audit({ actor: a, targetOid: target, operation: 'assign_preview', outcome: 'refused', reason: 'self_elevation' });
     return refuse('self_elevation');
   }
-  if (!canRoleAssign(currentRoles(a.oid), roleRaw)) {
-    audit({ actor: a, targetOid: target, operation: 'assign_preview', outcome: 'refused', reason: 'not_assignable' });
+  if (!canRoleAssign(await currentRoles(a.oid), roleRaw)) {
+    await audit({ actor: a, targetOid: target, operation: 'assign_preview', outcome: 'refused', reason: 'not_assignable' });
     return refuse('not_assignable');
   }
 
-  const before = currentRoles(target);
+  const before = await currentRoles(target);
   const after = [...new Set([...before, roleRaw])].sort() as WatsonRoleKey[];
-  const preview = buildPreview('assign', a, target, targetDisplayName, roleRaw, before, after, null);
-  PREVIEWS.set(preview.nonce, { ...preview, consumed: false, issuedAt: Date.now() });
-  audit({ actor: a, targetOid: target, operation: 'assign_preview', outcome: 'success', reason: 'preview_issued', previousRoles: before, resultingRoles: after, correlationId: preview.nonce });
+  const preview = await buildPreview('assign', a, target, targetDisplayName, roleRaw, before, after, null);
+  await persistPreview(preview);
+  await audit({ actor: a, targetOid: target, operation: 'assign_preview', outcome: 'success', reason: 'preview_issued', previousRoles: before, resultingRoles: after, correlationId: preview.nonce });
   return { ok: true, data: preview };
 }
 
-export function previewRemoval(
+export async function previewRemoval(
   actor: TrustedIdentity | null, targetOidRaw: unknown, roleRaw: unknown,
   targetDisplayName: string | null = null
-): Result<RolePreview> {
-  const gate = requireCapability(actor, 'rbac.remove', 'remove_preview', validTarget(targetOidRaw));
+): Promise<Result<RolePreview>> {
+  const gate = await requireCapability(actor, 'rbac.remove', 'remove_preview', validTarget(targetOidRaw));
   if (!gate.ok) return gate as Result<RolePreview>;
   const a = gate.data;
 
   if (!isWatsonRoleKey(roleRaw)) {
-    audit({ actor: a, targetOid: validTarget(targetOidRaw), operation: 'remove_preview', outcome: 'refused', reason: 'unknown_role' });
+    await audit({ actor: a, targetOid: validTarget(targetOidRaw), operation: 'remove_preview', outcome: 'refused', reason: 'unknown_role' });
     return refuse('unknown_role');
   }
   const target = validTarget(targetOidRaw);
   if (!target) {
-    audit({ actor: a, targetOid: null, operation: 'remove_preview', outcome: 'refused', reason: 'invalid_target' });
+    await audit({ actor: a, targetOid: null, operation: 'remove_preview', outcome: 'refused', reason: 'invalid_target' });
     return refuse('invalid_target');
   }
-  if (!canRoleRemove(currentRoles(a.oid), roleRaw)) {
-    audit({ actor: a, targetOid: target, operation: 'remove_preview', outcome: 'refused', reason: 'not_removable' });
+  if (!canRoleRemove(await currentRoles(a.oid), roleRaw)) {
+    await audit({ actor: a, targetOid: target, operation: 'remove_preview', outcome: 'refused', reason: 'not_removable' });
     return refuse('not_removable');
   }
 
-  const before = currentRoles(target);
+  const before = await currentRoles(target);
   const after = before.filter((r) => r !== roleRaw);
   // Last-admin implication is computed at preview AND re-checked at confirm.
   let lastAdmin: string | null = null;
   if (roleRaw === 'watson_role_admin' && before.includes('watson_role_admin')) {
-    if (countActiveRoleAdmins() <= 1) lastAdmin = 'This is the final Watson role administrator. Removal will be refused.';
+    if ((await rbacStore().countActiveRoleAdmins()) <= 1) lastAdmin = 'This is the final Watson role administrator. Removal will be refused.';
     else if (target === a.oid) lastAdmin = 'You are removing your own role-administration access. You will lose it on your next request.';
   }
-  const preview = buildPreview('remove', a, target, targetDisplayName, roleRaw, before, after, lastAdmin);
-  PREVIEWS.set(preview.nonce, { ...preview, consumed: false, issuedAt: Date.now() });
-  audit({ actor: a, targetOid: target, operation: 'remove_preview', outcome: 'success', reason: 'preview_issued', previousRoles: before, resultingRoles: after, correlationId: preview.nonce });
+  const preview = await buildPreview('remove', a, target, targetDisplayName, roleRaw, before, after, lastAdmin);
+  await persistPreview(preview);
+  await audit({ actor: a, targetOid: target, operation: 'remove_preview', outcome: 'success', reason: 'preview_issued', previousRoles: before, resultingRoles: after, correlationId: preview.nonce });
   return { ok: true, data: preview };
 }
 
-function buildPreview(
+async function buildPreview(
   operation: 'assign' | 'remove', actor: TrustedIdentity, target: string,
   targetDisplayName: string | null, role: WatsonRoleKey,
   before: WatsonRoleKey[], after: WatsonRoleKey[], lastAdmin: string | null
-): RolePreview {
+): Promise<RolePreview> {
   const capsBefore = capabilitiesFor(before);
   const capsAfter = capabilitiesFor(after);
   return {
-    nonce: issueNonce(),
+    // 256-bit CSPRNG. Returned to the caller once; only its digest is stored.
+    nonce: await generateNonce(),
     operation,
     actorOid: actor.oid,
     targetOid: target,
@@ -408,7 +408,7 @@ function buildPreview(
     sodWarnings: sodWarnings(after),
     lastAdminImplication: lastAdmin,
     requiresElevatedAcknowledgement: requiresElevatedAcknowledgement(role, after),
-    stateVersion: roleStateVersion(target),
+    stateVersion: await rbacStore().roleStateVersion(target),
     disclaimer: WATSON_ROLE_DISCLAIMER
   };
 }
@@ -420,151 +420,154 @@ export interface ConfirmInput {
   elevatedAcknowledged?: unknown;
 }
 
-function takePreview(
-  actor: TrustedIdentity, input: ConfirmInput, expected: 'assign' | 'remove'
-): Result<PendingPreview> {
-  const nonce = typeof input.nonce === 'string' ? input.nonce : '';
-  const p = PREVIEWS.get(nonce);
-  if (!p || p.operation !== expected) return refuse('stale_preview');
-  if (p.consumed) return refuse('replayed_preview');
-  if (Date.now() - p.issuedAt > PREVIEW_TTL_MS) return refuse('stale_preview');
-  // Bound to the actor who created it — a different administrator, or a
-  // now-revoked one, cannot spend someone else's preview.
-  if (p.actorOid !== actor.oid) return refuse('actor_mismatch');
-  if (validTarget(input.targetOid) !== p.targetOid) return refuse('target_mismatch');
-  if (input.role !== p.role) return refuse('role_mismatch');
-  // Time-of-check/time-of-use: the target's roles must not have moved.
-  if (roleStateVersion(p.targetOid) !== p.stateVersion) return refuse('stale_preview');
-  return { ok: true, data: p };
+// Persist a preview as a digest record. The raw nonce never reaches the store.
+async function persistPreview(p: RolePreview): Promise<void> {
+  const record: PreviewRecord = {
+    digest: await digestNonce(p.nonce),
+    operation: p.operation,
+    actorOid: p.actorOid,
+    targetOid: p.targetOid,
+    role: p.role,
+    stateVersion: p.stateVersion,
+    expiresAt: new Date(Date.now() + PREVIEW_TTL_MS).toISOString(),
+    elevatedRequired: p.requiresElevatedAcknowledgement,
+    payload: JSON.stringify({ targetDisplayName: p.targetDisplayName, currentRoles: p.currentRoles, resultingRoles: p.resultingRoles })
+  };
+  await rbacStore().putPreview(record);
 }
 
-export function confirmAssignment(
+// Atomically validate the binding AND consume the nonce. One adapter call, so a
+// caller cannot read the nonce, act, and mark it consumed as separate steps.
+async function takePreview(
+  actor: TrustedIdentity, input: ConfirmInput, expected: 'assign' | 'remove'
+): Promise<Result<PreviewRecord>> {
+  const raw = typeof input.nonce === 'string' ? input.nonce : '';
+  if (!raw) return refuse('stale_preview');
+  const target = validTarget(input.targetOid);
+  const r = await rbacStore().consumePreview(
+    await digestNonce(raw),
+    { operation: expected, actorOid: actor.oid, targetOid: target ?? '', role: input.role },
+    Date.now()
+  );
+  if (!r.ok) return refuse(r.reason);
+  return { ok: true, data: r.record };
+}
+
+export async function confirmAssignment(
   actor: TrustedIdentity | null, input: ConfirmInput, inject: FailureInjection = {}
-): Result<{ applied: boolean; roles: WatsonRoleKey[]; idempotent: boolean }> {
-  const gate = requireCapability(actor, 'rbac.assign', 'assign_confirm', validTarget(input.targetOid));
+): Promise<Result<{ applied: boolean; roles: WatsonRoleKey[]; idempotent: boolean }>> {
+  const gate = await requireCapability(actor, 'rbac.assign', 'assign_confirm', validTarget(input.targetOid));
   if (!gate.ok) return gate as never;
   const a = gate.data;
 
-  const taken = takePreview(a, input, 'assign');
+  // Binding check AND single-use consumption in ONE atomic adapter call.
+  const taken = await takePreview(a, input, 'assign');
   if (!taken.ok) {
-    audit({ actor: a, targetOid: validTarget(input.targetOid), operation: 'assign_confirm', outcome: 'refused', reason: taken.reason });
+    await audit({ actor: a, targetOid: validTarget(input.targetOid), operation: 'assign_confirm', outcome: 'refused', reason: taken.reason });
     return taken as never;
   }
   const p = taken.data;
+  const payload = parsePayload(p.payload);
 
-  if (p.requiresElevatedAcknowledgement && input.elevatedAcknowledged !== true) {
-    audit({ actor: a, targetOid: p.targetOid, operation: 'assign_confirm', outcome: 'refused', reason: 'elevated_ack_required', elevatedAcknowledged: false });
+  if (p.elevatedRequired && input.elevatedAcknowledged !== true) {
+    await audit({ actor: a, targetOid: p.targetOid, operation: 'assign_confirm', outcome: 'refused', reason: 'elevated_ack_required', elevatedAcknowledged: false });
     return refuse('elevated_ack_required');
   }
 
-  // Idempotent: already held -> consume the nonce, change nothing, report truthfully.
-  if (findActive(p.targetOid, p.role)) {
-    p.consumed = true;
-    audit({ actor: a, targetOid: p.targetOid, operation: 'assign_confirm', outcome: 'success', reason: 'idempotent_already_assigned', previousRoles: p.currentRoles, resultingRoles: p.currentRoles, source: 'administrator', elevatedAcknowledged: input.elevatedAcknowledged === true, correlationId: p.nonce });
-    return { ok: true, data: { applied: false, roles: currentRoles(p.targetOid), idempotent: true } };
+  // Assignment AND its audit row commit together, or neither. Idempotency is
+  // decided inside the adapter, not by a caller read-then-write.
+  const r = await rbacStore().grantRole({
+    targetOid: p.targetOid, targetDisplayName: payload.targetDisplayName, targetUpn: null,
+    role: p.role, source: 'administrator', actorOid: a.oid, actorUpn: a.upn,
+    correlationId: p.digest.slice(0, 12), elevatedAcknowledged: input.elevatedAcknowledged === true,
+    previousRoles: payload.currentRoles, resultingRoles: payload.resultingRoles, inject
+  });
+  if (!r.ok) {
+    await audit({ actor: a, targetOid: p.targetOid, operation: 'assign_confirm', outcome: 'error', reason: r.reason });
+    return refuse(r.reason === 'audit_failure' ? 'audit_failure' : r.reason === 'store_unavailable' ? 'store_unavailable' : 'persistence_failure');
   }
-
-  const commit = commitAtomically(
-    () => upsertActiveAssignment({
-      targetOid: p.targetOid, targetDisplayName: p.targetDisplayName, targetUpn: null,
-      role: p.role, source: 'administrator', actorOid: a.oid
-    }),
-    {
-      correlationId: p.nonce, actorOid: a.oid, actorUpn: a.upn, targetOid: p.targetOid,
-      operation: 'assign_confirm', outcome: 'success', reason: 'role_assigned',
-      previousRoles: p.currentRoles, resultingRoles: p.resultingRoles,
-      source: 'administrator', elevatedAcknowledged: input.elevatedAcknowledged === true
-    },
-    inject
-  );
-  if (!commit.ok) {
-    audit({ actor: a, targetOid: p.targetOid, operation: 'assign_confirm', outcome: 'error', reason: commit.reason ?? 'persistence_failure' });
-    return refuse(commit.reason === 'audit_persistence_failure' ? 'audit_failure' : 'persistence_failure');
-  }
-  p.consumed = true;
-  return { ok: true, data: { applied: true, roles: currentRoles(p.targetOid), idempotent: false } };
+  return { ok: true, data: { applied: r.data.applied, roles: r.data.roles, idempotent: r.data.idempotent } };
 }
 
-export function confirmRemoval(
+export async function confirmRemoval(
   actor: TrustedIdentity | null, input: ConfirmInput, inject: FailureInjection = {}
-): Result<{ applied: boolean; roles: WatsonRoleKey[]; idempotent: boolean }> {
-  const gate = requireCapability(actor, 'rbac.remove', 'remove_confirm', validTarget(input.targetOid));
+): Promise<Result<{ applied: boolean; roles: WatsonRoleKey[]; idempotent: boolean }>> {
+  const gate = await requireCapability(actor, 'rbac.remove', 'remove_confirm', validTarget(input.targetOid));
   if (!gate.ok) return gate as never;
   const a = gate.data;
 
-  const taken = takePreview(a, input, 'remove');
+  const taken = await takePreview(a, input, 'remove');
   if (!taken.ok) {
-    audit({ actor: a, targetOid: validTarget(input.targetOid), operation: 'remove_confirm', outcome: 'refused', reason: taken.reason });
+    await audit({ actor: a, targetOid: validTarget(input.targetOid), operation: 'remove_confirm', outcome: 'refused', reason: taken.reason });
     return taken as never;
   }
   const p = taken.data;
+  const payload = parsePayload(p.payload);
 
-  // Idempotent: not held -> nothing to remove.
-  if (!findActive(p.targetOid, p.role)) {
-    p.consumed = true;
-    audit({ actor: a, targetOid: p.targetOid, operation: 'remove_confirm', outcome: 'success', reason: 'idempotent_not_assigned', previousRoles: p.currentRoles, resultingRoles: p.currentRoles, source: 'administrator', correlationId: p.nonce });
-    return { ok: true, data: { applied: false, roles: currentRoles(p.targetOid), idempotent: true } };
-  }
-
-  // LAST-ADMIN PROTECTION — re-evaluated here, transactionally, not trusted
-  // from the preview. Two concurrent removals cannot both pass this point.
-  if (p.role === 'watson_role_admin' && countActiveRoleAdmins() <= 1) {
-    audit({ actor: a, targetOid: p.targetOid, operation: 'remove_confirm', outcome: 'refused', reason: 'last_admin_protected', previousRoles: p.currentRoles, resultingRoles: p.currentRoles });
-    return refuse('last_admin_protected');
-  }
   // Self-removal while another admin exists still needs explicit acknowledgement.
   if (p.role === 'watson_role_admin' && p.targetOid === a.oid && input.elevatedAcknowledged !== true) {
-    audit({ actor: a, targetOid: p.targetOid, operation: 'remove_confirm', outcome: 'refused', reason: 'elevated_ack_required', elevatedAcknowledged: false });
+    await audit({ actor: a, targetOid: p.targetOid, operation: 'remove_confirm', outcome: 'refused', reason: 'elevated_ack_required', elevatedAcknowledged: false });
     return refuse('elevated_ack_required');
   }
 
-  const commit = commitAtomically(
-    () => deactivateAssignment({ targetOid: p.targetOid, role: p.role, actorOid: a.oid }),
-    {
-      correlationId: p.nonce, actorOid: a.oid, actorUpn: a.upn, targetOid: p.targetOid,
-      operation: 'remove_confirm', outcome: 'success', reason: 'role_removed',
-      previousRoles: p.currentRoles, resultingRoles: p.resultingRoles,
-      source: 'administrator', elevatedAcknowledged: input.elevatedAcknowledged === true
-    },
-    inject
-  );
-  if (!commit.ok) {
-    audit({ actor: a, targetOid: p.targetOid, operation: 'remove_confirm', outcome: 'error', reason: commit.reason ?? 'persistence_failure' });
-    return refuse(commit.reason === 'audit_persistence_failure' ? 'audit_failure' : 'persistence_failure');
+  // FINAL-ADMINISTRATOR PROTECTION is enforced INSIDE revokeRole, in the same
+  // atomic boundary as the removal — never as a caller-side count-then-delete.
+  const r = await rbacStore().revokeRole({
+    targetOid: p.targetOid, role: p.role, actorOid: a.oid, actorUpn: a.upn,
+    correlationId: p.digest.slice(0, 12), elevatedAcknowledged: input.elevatedAcknowledged === true,
+    previousRoles: payload.currentRoles, resultingRoles: payload.resultingRoles, inject
+  });
+  if (!r.ok) {
+    if (r.reason === 'last_admin_protected') return refuse('last_admin_protected');
+    await audit({ actor: a, targetOid: p.targetOid, operation: 'remove_confirm', outcome: 'error', reason: r.reason });
+    return refuse(r.reason === 'audit_failure' ? 'audit_failure' : r.reason === 'store_unavailable' ? 'store_unavailable' : 'persistence_failure');
   }
-  p.consumed = true;
-  return { ok: true, data: { applied: true, roles: currentRoles(p.targetOid), idempotent: false } };
+  return { ok: true, data: { applied: r.data.applied, roles: r.data.roles, idempotent: r.data.idempotent } };
+}
+
+// The preview payload carries presentation state only; it is never authoritative.
+function parsePayload(raw: string): { targetDisplayName: string | null; currentRoles: WatsonRoleKey[]; resultingRoles: WatsonRoleKey[] } {
+  try {
+    const v = JSON.parse(raw) as { targetDisplayName?: string | null; currentRoles?: WatsonRoleKey[]; resultingRoles?: WatsonRoleKey[] };
+    return {
+      targetDisplayName: v.targetDisplayName ?? null,
+      currentRoles: Array.isArray(v.currentRoles) ? v.currentRoles : [],
+      resultingRoles: Array.isArray(v.resultingRoles) ? v.resultingRoles : []
+    };
+  } catch {
+    return { targetDisplayName: null, currentRoles: [], resultingRoles: [] };
+  }
 }
 
 // ------------------------------------------------------------
 // Authorized reads
 // ------------------------------------------------------------
-export function readRegistry(actor: TrustedIdentity | null): Result<typeof WATSON_ROLES> {
-  const gate = requireCapability(actor, 'rbac.registry.read', 'registry_read', null);
+export async function readRegistry(actor: TrustedIdentity | null): Promise<Result<typeof WATSON_ROLES>> {
+  const gate = await requireCapability(actor, 'rbac.registry.read', 'registry_read', null);
   if (!gate.ok) return gate as Result<typeof WATSON_ROLES>;
   return { ok: true, data: WATSON_ROLES };
 }
 
-export function readEmployeeRoles(
+export async function readEmployeeRoles(
   actor: TrustedIdentity | null, targetOidRaw: unknown
-): Result<{ targetOid: string; roles: WatsonRoleKey[]; capabilities: Capability[] }> {
+): Promise<Result<{ targetOid: string; roles: WatsonRoleKey[]; capabilities: Capability[] }>> {
   const target = validTarget(targetOidRaw);
-  const gate = requireCapability(actor, 'rbac.employee.read', 'employee_role_read', target);
+  const gate = await requireCapability(actor, 'rbac.employee.read', 'employee_role_read', target);
   if (!gate.ok) return gate as never;
   if (!target) {
-    audit({ actor: gate.data, targetOid: null, operation: 'employee_role_read', outcome: 'refused', reason: 'invalid_target' });
+    await audit({ actor: gate.data, targetOid: null, operation: 'employee_role_read', outcome: 'refused', reason: 'invalid_target' });
     return refuse('invalid_target');
   }
-  const roles = currentRoles(target);
+  const roles = await currentRoles(target);
   return { ok: true, data: { targetOid: target, roles, capabilities: capabilitiesFor(roles) } };
 }
 
-export function readAuditHistory(
+export async function readAuditHistory(
   actor: TrustedIdentity | null, targetOid?: string, limit = 100
-): Result<ReturnType<typeof listAudit>> {
-  const gate = requireCapability(actor, 'rbac.audit.read', 'audit_read', targetOid ?? null);
-  if (!gate.ok) return gate as Result<ReturnType<typeof listAudit>>;
-  return { ok: true, data: listAudit({ targetOid, limit }) };
+): Promise<Result<RbacAuditEvent[]>> {
+  const gate = await requireCapability(actor, 'rbac.audit.read', 'audit_read', targetOid ?? null);
+  if (!gate.ok) return gate as Result<RbacAuditEvent[]>;
+  return { ok: true, data: await rbacStore().listAudit({ targetOid, limit }) };
 }
 
 // ------------------------------------------------------------
@@ -626,11 +629,11 @@ export function sanitizeDirectoryText(v: unknown): string {
     .slice(0, 120);
 }
 
-export function searchEmployees(
+export async function searchEmployees(
   actor: TrustedIdentity | null, queryRaw: unknown,
   directory: readonly DirectoryEntry[] | DirectorySource, env: NodeJS.ProcessEnv = process.env
-): Result<SearchResult> {
-  const gate = requireCapability(actor, 'rbac.employee.read', 'employee_search', null);
+): Promise<Result<SearchResult>> {
+  const gate = await requireCapability(actor, 'rbac.employee.read', 'employee_search', null);
   if (!gate.ok) return gate as never;
 
   const q = sanitizeDirectoryText(queryRaw).toLowerCase();

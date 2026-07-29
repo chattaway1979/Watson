@@ -25,14 +25,14 @@ export async function GET(req: Request) {
   // Gate off: the staged directory, which declares its own provenance. No token
   // is acquired and no Graph request is made.
   if (!isGraphLiveReadOnlyEnabled()) {
-    const r = searchEmployees(actor, q, STAGED_DIRECTORY_SOURCE);
+    const r = await searchEmployees(actor, q, STAGED_DIRECTORY_SOURCE);
     if (!r.ok) return NextResponse.json({ error: r.reason, ...messageFor(r.reason) }, { status: statusFor(r.reason), ...NO_STORE });
     return NextResponse.json(r.data, NO_STORE);
   }
 
   // Gate on: authorize FIRST, so an unauthenticated or non-administrator caller
   // can never cause a tenant directory read.
-  const gate = searchEmployees(actor, q, { provenance: 'graph_live', entries: [] });
+  const gate = await searchEmployees(actor, q, { provenance: 'graph_live', entries: [] });
   if (!gate.ok) {
     return NextResponse.json({ error: gate.reason, ...messageFor(gate.reason) }, { status: statusFor(gate.reason), ...NO_STORE });
   }
@@ -48,7 +48,7 @@ export async function GET(req: Request) {
   }
 
   const source: DirectorySource = live.source;
-  const r = searchEmployees(actor, q, source);
+  const r = await searchEmployees(actor, q, source);
   if (!r.ok) return NextResponse.json({ error: r.reason, ...messageFor(r.reason) }, { status: statusFor(r.reason), ...NO_STORE });
   return NextResponse.json(r.data, NO_STORE);
 }

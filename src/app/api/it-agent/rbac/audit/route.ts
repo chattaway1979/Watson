@@ -10,7 +10,7 @@ export async function GET(req: Request) {
   const u = new URL(req.url);
   const target = u.searchParams.get('oid') ?? undefined;
   const limit = Math.min(Number(u.searchParams.get('limit') ?? 100) || 100, 200);
-  const r = readAuditHistory(actor, target, limit);
+  const r = await readAuditHistory(actor, target, limit);
   if (!r.ok) return NextResponse.json({ error: r.reason, ...messageFor(r.reason) }, { status: statusFor(r.reason), ...NO_STORE });
   return NextResponse.json({ events: r.data }, NO_STORE);
 }

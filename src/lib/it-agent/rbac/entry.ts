@@ -27,16 +27,26 @@ export interface RbacEntryResult {
 // Used by the page for its render decision. It is NOT the security boundary —
 // every API route is refused independently by the security core — but it must
 // agree with that boundary, which is why both start from bootstrap.
-export function authorizeRbacEntry(
+export async function authorizeRbacEntry(
   headers: HeaderBag,
   capability: Capability = 'rbac.registry.read',
   env: NodeJS.ProcessEnv = process.env
-): RbacEntryResult {
+): Promise<RbacEntryResult> {
   // Bootstrap FIRST: an unbootstrapped deployment must be able to become
   // administrable on the very first request, not one request later.
-  ensureBootstrap(env);
+  await ensureBootstrap(env);
   const actor = trustedIdentityFromHeaders(headers, env);
   if (!actor) return { actor: null, authorized: false, roles: [] };
-  // Read through after bootstrap — never a value cached from before it.
-  return { actor, authorized: actorHasCapability(actor, capability), roles: currentRoles(actor.oid) };
+  // 021G-2: a store failure must render the refusal card, NOT throw. An
+  // unhandled rejection here would surface as a server error on the admin page,
+  // which tells an operator nothing and looks like an outage rather than a
+  // refusal. Fail closed: no actor keeps their authority when the store that
+  // holds it cannot be read.
+  try {
+    // Both awaited: an unawaited Promise is truthy and would grant access.
+    const authorized = await actorHasCapability(actor, capability);
+    return { actor, authorized, roles: await currentRoles(actor.oid) };
+  } catch {
+    return { actor, authorized: false, roles: [] };
+  }
 }

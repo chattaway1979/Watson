@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 export async function GET(req: Request) {
   const actor = trustedIdentityFromHeaders(req.headers);
   const oid = new URL(req.url).searchParams.get('oid');
-  const r = readEmployeeRoles(actor, oid);
+  const r = await readEmployeeRoles(actor, oid);
   if (!r.ok) return NextResponse.json({ error: r.reason, ...messageFor(r.reason) }, { status: statusFor(r.reason), ...NO_STORE });
   return NextResponse.json(r.data, NO_STORE);
 }
