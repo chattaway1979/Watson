@@ -281,6 +281,22 @@ export async function runRbacDirectoryPolicyTests(): Promise<{ pass: number; fai
       /JSON\.stringify\(result/.test(g) && /process\.exit\(failed \? 1 : 0\)/.test(g));
     check('the guard never prints app settings wholesale',
       /stdio: 'ignore'/.test(g) && !/appsettings list/.test(g));
+    // The guard's FIRST real run shipped a package whose zip entry names used
+    // backslashes (Windows PowerShell 5.1 / .NET Framework writes OS-native
+    // separators). Every file extracted as one flat name on Linux and the
+    // container exited 1. The directory was perfect; the artifact was not.
+    check('the guard builds the zip with pwsh, not Windows PowerShell 5.1',
+      /execFileSync\('pwsh'/.test(g) && !/execFileSync\('powershell'/.test(g));
+    check('the guard inspects the ZIP itself, not just the staging directory',
+      /ZipFile\]::OpenRead/.test(g));
+    check('the guard rejects backslash zip entry names',
+      /zip entry names use backslashes \(unusable on Linux\)/.test(g));
+    check('the guard requires the entries a Next standalone server needs',
+      /\.next\/BUILD_ID/.test(g) && /routes-manifest\.json/.test(g) && /server\.js/.test(g));
+    check('the guard rejects a runtime store inside the zip',
+      /zip contains a runtime store/.test(g));
+    check('the guard requires static assets in the zip',
+      /zip contains no \.next\/static assets/.test(g));
     check('the guard targets only the isolated staging app',
       /watson-pilot-hrnp01/.test(g) && !/watson-staged-015/.test(g) && !/lumensync/i.test(g));
   }

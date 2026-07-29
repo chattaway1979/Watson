@@ -110,7 +110,13 @@ const pkg = step('package the verified build', () => {
   if (fs.existsSync('public')) fs.cpSync('public', path.join(out, 'public'), { recursive: true });
   const zip = path.join(os.tmpdir(), `watson-${sha?.head?.slice(0, 12) ?? 'build'}.zip`);
   fs.rmSync(zip, { force: true });
-  execFileSync('powershell', ['-NoProfile', '-Command',
+  // MUST be pwsh (PowerShell 7 / .NET Core), never `powershell` (5.1 / .NET
+  // Framework). .NET Framework's ZipFile writes OS-NATIVE separators, producing
+  // entry names like `.next\server\page.js`. The zip spec requires forward
+  // slashes, so on Linux App Service every file extracts as one flat filename
+  // instead of a directory tree and the container exits 1 at startup. That is
+  // exactly how this script took staging down on its first run.
+  execFileSync('pwsh', ['-NoProfile', '-Command',
     `Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory('${out}','${zip}','Optimal',$false)`
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
   return { dir: out, zip };
@@ -135,7 +141,30 @@ step('verify package contents and absence of runtime state', () => {
   };
   walk(dir);
   if (forbidden.length) fail(`runtime store bundled: ${forbidden.map((f) => path.relative(dir, f)).join(', ')}`);
-  return 'server.js + static present, no runtime store';
+
+  // Inspect the ZIP ITSELF, not just the staging directory. A directory can look
+  // perfect while the archive built from it is unusable — which is precisely the
+  // failure that took staging down: correct files, backslash entry names, and a
+  // container that could not start. Checking the artifact that actually ships is
+  // the only check that would have caught it.
+  const listing = execFileSync('pwsh', ['-NoProfile', '-Command',
+    `Add-Type -AssemblyName System.IO.Compression.FileSystem; ` +
+    `$z=[System.IO.Compression.ZipFile]::OpenRead('${pkg.zip}'); ` +
+    `$z.Entries | ForEach-Object { $_.FullName }; $z.Dispose()`
+  ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n').map((s) => s.trim()).filter(Boolean);
+
+  const backslashed = listing.filter((n) => n.includes('\\'));
+  if (backslashed.length) {
+    fail(`zip entry names use backslashes (unusable on Linux): ${backslashed.slice(0, 3).join(', ')}`);
+  }
+  for (const required of ['server.js', '.next/BUILD_ID', '.next/routes-manifest.json']) {
+    if (!listing.includes(required)) fail(`zip is missing a required entry: ${required}`);
+  }
+  if (!listing.some((n) => n.startsWith('.next/static/'))) fail('zip contains no .next/static assets');
+  if (listing.some((n) => n.startsWith('data/') || n.endsWith('/watson-store.json'))) {
+    fail('zip contains a runtime store');
+  }
+  return `${listing.length} zip entries verified, forward-slash paths, no runtime store`;
 });
 
 // ---------------------------------------------------------------- 8. deploy
