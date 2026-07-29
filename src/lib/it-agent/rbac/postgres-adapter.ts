@@ -157,7 +157,26 @@ export class PostgresRbacStore implements RbacStoreAdapter {
         // When a schema is configured the connection's search_path already points
         // at it, so the schema has to exist before the DDL below can land in it.
         if (this.cfg.schema) await pool.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(this.cfg.schema)}`);
-        await pool.query(sql);
+        try {
+          await pool.query(sql);
+        } catch (ddlError) {
+          // THE APPLICATION SHOULD NOT NEED DDL RIGHTS. In the deployed
+          // environment the schema is applied out-of-band by an administrator and
+          // the managed identity holds only SELECT/INSERT/UPDATE — which is the
+          // posture we want, because an application that can DROP its own audit
+          // table is one bug away from destroying the evidence.
+          //
+          // So a failed DDL attempt is not automatically fatal: what matters is
+          // whether the schema is ALREADY THERE. Verify that directly. If it is,
+          // this store is ready. If it is not, the original error stands.
+          try {
+            await pool.query('SELECT 1 FROM rbac_assignment LIMIT 0');
+            await pool.query('SELECT 1 FROM rbac_audit LIMIT 0');
+            await pool.query('SELECT 1 FROM rbac_preview_nonce LIMIT 0');
+          } catch {
+            throw ddlError;
+          }
+        }
       })().catch((e) => { this.ready = null; throw e; });
     }
     return this.ready;
@@ -267,19 +286,19 @@ export class PostgresRbacStore implements RbacStoreAdapter {
       const c = await pool.connect();
       try { await c.query('SELECT 1'); } finally { c.release(); }
     } catch (e) {
-      return { ok: false, phase: 'connect', category: PostgresRbacStore.classify(e) };
+      return { ok: false, phase: 'connect', category: PostgresRbacStore.classify(e), cause: PostgresRbacStore.cause(e) };
     }
     // 3. Does the schema apply? (A privilege gap shows up here, not at connect.)
     try {
       await this.ensureSchema();
     } catch (e) {
-      return { ok: false, phase: 'schema', category: PostgresRbacStore.classify(e) };
+      return { ok: false, phase: 'schema', category: PostgresRbacStore.classify(e), cause: PostgresRbacStore.cause(e) };
     }
     // 4. Can the RBAC tables actually be read?
     try {
       await this.q('SELECT 1 FROM rbac_assignment LIMIT 1');
     } catch (e) {
-      return { ok: false, phase: 'query', category: PostgresRbacStore.classify(e) };
+      return { ok: false, phase: 'query', category: PostgresRbacStore.classify(e), cause: PostgresRbacStore.cause(e) };
     }
     return { ok: true, phase: 'none', category: 'ok' };
   }
