@@ -52,6 +52,7 @@ import { runRbacDirectoryPolicyTests } from './rbac-directory-policy-021e.selfte
 import { runRbacPersistenceTests } from './rbac-persistence-021g.selftest';
 import { runRbacAsyncTests } from './rbac-async-021g2.selftest';
 import { runRbacPostgresStructureTests } from './rbac-postgres-021g3.selftest';
+import { runDeployGuardTests } from './deploy-guard-021g3.selftest';
 
 let pass = 0, fail = 0;
 const failures: string[] = [];
@@ -267,6 +268,9 @@ async function main() {
 
   const rbacPg = await runRbacPostgresStructureTests();
   pass += rbacPg.pass; fail += rbacPg.fail; failures.push(...rbacPg.failures);
+
+  const guard = await runDeployGuardTests();
+  pass += guard.pass; fail += guard.fail; failures.push(...guard.failures);
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail > 0) {

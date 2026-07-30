@@ -39,3 +39,6 @@ Desktop.ini
 *.swp
 *.swo
 *~
+
+# 021G-3: build provenance is generated into the package at build time.
+/watson-build.json

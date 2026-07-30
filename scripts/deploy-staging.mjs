@@ -15,6 +15,20 @@
  *      while the old code was still live — "deployment accepted" and
  *      "deployment active" are different claims too.
  *
+ *   3. (021G-3) The convergence check itself was hollow. It compared health's
+ *      `commit` against the expected SHA, but `commit` came from the
+ *      WATSON_DEPLOYED_SHA app setting that THIS SCRIPT writes before it
+ *      restarts. So it validated its own bookkeeping, not the running bundle,
+ *      and reported "deployment active" while the previous package was still
+ *      answering requests. Observed repeatedly during the 021G-3 cutover: new
+ *      code only ran after an extra manual restart.
+ *
+ *      The fix: convergence is judged on PACKAGE-EMBEDDED provenance
+ *      (watson-build.json + .next/BUILD_ID, written into the artefact at build
+ *      time and immutable once deployed), and EVERY active worker must report
+ *      it. An app setting is mutable from outside the artefact, so it can never
+ *      be evidence about the artefact.
+ *
  * The order below is therefore mandatory, every step aborts on failure, and the
  * final verdict is machine-readable. Nothing here prints a secret: app settings
  * are written with output suppressed and never read back wholesale.
@@ -190,33 +204,90 @@ step('restart to remount the package', () => {
   return 'restarted';
 });
 
-// ------------------------------------------- 10/11. poll until ACTIVE + exact
-const served = step('poll until the worker serves the expected SHA', () => {
+// --------------------------------- 10/11. poll until ACTIVE on the PACKAGE sha
+// The expected fingerprint comes from the artefact that was just built, NOT from
+// anything this script asserts about itself.
+const expected = step('read the package-embedded fingerprint from the built artefact', () => {
+  const f = path.join(process.cwd(), '.next', 'standalone', 'watson-build.json');
+  if (!fs.existsSync(f)) fail('watson-build.json missing from the standalone build - provenance was not generated');
+  const prov = JSON.parse(fs.readFileSync(f, 'utf8'));
+  if (prov.sha !== sha.head) fail(`package provenance sha ${prov.sha} != HEAD ${sha.head}`);
+  if (!prov.buildId) fail('package provenance carries no buildId');
+  if (prov.sourceDirtyAtBuild) fail('the package was built from a dirty tree');
+  return { packageSha: prov.sha, packageBuildId: prov.buildId };
+});
+
+function activeWorkerCount() {
+  try {
+    const n = Number(sh(`az webapp list-instances -n ${APP} -g ${RG} --query "length(@)" -o tsv`));
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  } catch { return 1; }
+}
+
+// Requires EVERY active worker to report the package-embedded fingerprint.
+// Polling once and believing the answer is what let a stale worker pass: with two
+// workers one can be current while the other still serves the old mount, and a
+// single request has a 50% chance of asking the wrong one.
+const served = step('poll every active worker for the package-embedded fingerprint', () => {
   if (DRY) return 'dry-run: not polled';
-  const deadline = Date.now() + 300_000;
+  const wanted = activeWorkerCount();
+  const deadline = Date.now() + 420_000;
+  const seen = new Map();
   let last = null;
   while (Date.now() < deadline) {
     try {
-      const body = sh(`curl -s --max-time 15 ${HEALTH}`);
-      const h = JSON.parse(body);
+      const h = JSON.parse(sh(`curl -s --max-time 20 "${HEALTH}?probe=${Date.now()}"`));
       last = h;
-      if (h.commit === sha.head) return h;
+      seen.set(h.workerId ?? 'unknown', h);
+      const matches = (x) => x.packageCommit === expected.packageSha && x.packageBuildId === expected.packageBuildId;
+      if (seen.size >= wanted && [...seen.values()].every(matches)) {
+        return { workers: seen.size, expectedWorkers: wanted, ids: [...seen.keys()], body: last };
+      }
+      // A worker matching the app setting but NOT the package IS the stale-bundle
+      // condition. Forget it so a later poll can re-observe it once restarted;
+      // never accept it.
+      for (const [k, v] of [...seen]) if (!matches(v)) seen.delete(k);
     } catch { /* worker still starting */ }
     execSync('powershell -NoProfile -Command "Start-Sleep -Seconds 5"', { stdio: 'ignore' });
   }
-  fail(`served SHA never converged. last=${JSON.stringify(last).slice(0, 200)}`);
+  fail(`not every worker converged on the package fingerprint. wanted=${wanted} observed=${[...seen.keys()].join(',') || 'none'} last=${JSON.stringify(last).slice(0, 300)}`);
+});
+
+// A separate, explicit claim: workers agree with EACH OTHER and with the
+// artefact. Disagreement is its own failure, not something to retry away.
+step('verify all workers agree on the package fingerprint', () => {
+  if (DRY) return 'dry-run: not verified';
+  const bodies = [];
+  const n = Math.max(8, (served.expectedWorkers ?? 1) * 5);
+  for (let i = 0; i < n; i++) {
+    try { bodies.push(JSON.parse(sh(`curl -s --max-time 20 "${HEALTH}?agree=${i}-${Date.now()}"`))); } catch { /* transient */ }
+  }
+  if (!bodies.length) fail('no worker answered the agreement check');
+  const buildIds = [...new Set(bodies.map((b) => b.packageBuildId))];
+  const commits = [...new Set(bodies.map((b) => b.packageCommit))];
+  const stores = [...new Set(bodies.map((b) => b.rbacStore))];
+  if (buildIds.length !== 1) fail(`workers disagree on packageBuildId: ${JSON.stringify(buildIds)}`);
+  if (commits.length !== 1) fail(`workers disagree on packageCommit: ${JSON.stringify(commits)}`);
+  if (buildIds[0] !== expected.packageBuildId) fail(`workers serve packageBuildId ${buildIds[0]}, expected ${expected.packageBuildId}`);
+  if (stores.length !== 1) fail(`workers disagree on the active RBAC store: ${JSON.stringify(stores)}`);
+  return { distinctWorkers: [...new Set(bodies.map((b) => b.workerId))], packageBuildId: buildIds[0], store: stores[0] };
 });
 
 // -------------------------------------------------- 12. authenticated posture
 step('verify deployed posture', () => {
   if (DRY) return 'dry-run: not verified';
-  if (served.commit !== sha.head) fail(`served ${served.commit} != package ${sha.head}`);
-  if (served.environment !== 'staging-021c2') fail(`unexpected environment ${served.environment}`);
-  if (served.liveExecutionEnabled !== false) fail('live execution is enabled — refusing to accept this deployment');
+  const h = served.body;
+  // Both are checked and they are NOT the same claim. The package fingerprint is
+  // the one that proves which code is running.
+  if (h.packageCommit !== sha.head) fail(`running package ${h.packageCommit} != HEAD ${sha.head}`);
+  if (h.commit !== sha.head) fail(`app-setting SHA ${h.commit} != HEAD ${sha.head}`);
+  if (h.environment !== 'staging-021c2') fail(`unexpected environment ${h.environment}`);
+  if (h.liveExecutionEnabled !== false) fail('live execution is enabled — refusing to accept this deployment');
   // Easy Auth must still reject anonymous access to a privileged route.
   const code = sh(`curl -s -o /dev/null -w "%{http_code}" --max-time 25 https://${APP}.azurewebsites.net/admin/access-and-roles`);
   if (code !== '401') fail(`anonymous access to the admin page returned ${code}, expected 401`);
-  return { authMode: served.authMode, liveRead: served.liveReadGateEnabled, liveExec: served.liveExecutionEnabled, anonymous: code };
+  return { authMode: h.authMode, liveRead: h.liveReadGateEnabled, liveExec: h.liveExecutionEnabled,
+    anonymous: code, appSettingSha: h.commit, packageSha: h.packageCommit, packageBuildId: h.packageBuildId };
 });
 
 // ---------------------------------------------------------------- verdict
@@ -225,10 +296,16 @@ const result = {
   ok: !failed,
   // These two are deliberately separate claims.
   deploymentAccepted: steps.find((s) => s.name === 'deploy the package')?.status === 'ok',
-  deploymentActive: steps.find((s) => s.name === 'poll until the worker serves the expected SHA')?.status === 'ok',
+  deploymentActive: steps.find((s) => s.name === 'poll every active worker for the package-embedded fingerprint')?.status === 'ok',
+  allWorkersAgree: steps.find((s) => s.name === 'verify all workers agree on the package fingerprint')?.status === 'ok',
   expectedSha: sha?.head ?? null,
-  servedSha: served?.commit ?? null,
-  shaMatch: Boolean(sha?.head && served?.commit && sha.head === served.commit),
+  // Reported separately on purpose: an app setting is not evidence about the
+  // running bundle, and conflating the two is the defect 021G-3 exposed.
+  appSettingSha: served?.body?.commit ?? null,
+  packageSha: served?.body?.packageCommit ?? null,
+  packageBuildId: served?.body?.packageBuildId ?? null,
+  workersObserved: served?.ids ?? null,
+  shaMatch: Boolean(sha?.head && served?.body?.packageCommit && sha.head === served.body.packageCommit),
   deploymentId: deployment?.deploymentId ?? null,
   environment: served?.environment ?? null,
   failure: failed,

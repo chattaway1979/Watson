@@ -9,9 +9,16 @@
 // ============================================================
 import { deploymentHealth } from '@/lib/it-agent/deployment';
 import { rbacStoreProvenance, rbacStore } from '@/lib/it-agent/rbac/store-provider';
+import { packageProvenance } from '@/lib/it-agent/build-provenance';
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
+
+// Bounded but generous enough that a normal cold connection is not reported as a
+// failure. Total worst case is the sum of the two, which stays well inside the
+// platform request timeout.
+const COLD_PROBE_BUDGET_MS = 15_000;
+const WARM_PROBE_BUDGET_MS = 10_000;
 
 // 021G-3: prove over HTTP which RBAC store a worker is ACTUALLY using and whether
 // it can reach it. Without this, "staging is on PostgreSQL" is a claim about
@@ -44,14 +51,28 @@ async function storeHealth(): Promise<{
     // adapter can say WHICH stage failed, report that — phase and classified
     // category only, never a driver message.
     const probe = (store as { probe?: () => Promise<{ ok: boolean; phase: string; category: string; cause?: string }> }).probe;
-    const result = await Promise.race([
+    // COLD START. The first probe after a restart pays for TLS, an Entra token
+    // fetch and a fresh connection, which legitimately exceeded the old 8s
+    // budget and made a healthy worker report itself unreachable. A false
+    // unhealthy result is not harmless: it trains operators to ignore the
+    // signal. So the budget is larger AND a timed-out first attempt is retried
+    // once with a warm pool, which is the attempt that reflects steady state.
+    // It stays bounded — two attempts, hard-capped — so health can never hang.
+    const attempt = (budgetMs: number) => Promise.race([
       probe ? probe.call(store) : store.ping().then((ok) => ({
         ok, phase: 'none', category: ok ? 'ok' : 'store_unavailable',
         cause: ok ? undefined : 'unknown' as string | undefined
       })),
       new Promise<{ ok: boolean; phase: string; category: string; cause?: string }>((r) =>
-        setTimeout(() => r({ ok: false, phase: 'connect', category: 'store_unavailable', cause: 'probe_timeout' }), 8_000))
+        setTimeout(() => r({ ok: false, phase: 'connect', category: 'store_unavailable', cause: 'probe_timeout' }), budgetMs))
     ]);
+    let result = await attempt(COLD_PROBE_BUDGET_MS);
+    if (!result.ok && result.cause === 'probe_timeout') {
+      result = await attempt(WARM_PROBE_BUDGET_MS);
+      // Distinguishable from a first-attempt timeout, so a genuinely slow store
+      // is not silently reported the same way as a cold start.
+      if (!result.ok && result.cause === 'probe_timeout') result = { ...result, cause: 'probe_timeout_after_retry' };
+    }
     reachable = result.ok;
     if (!result.ok) { phase = result.phase; category = result.category; cause = result.cause ?? null; }
   } catch {
@@ -68,6 +89,7 @@ async function storeHealth(): Promise<{
 export async function GET() {
   const h = deploymentHealth(process.env);
   const s = await storeHealth();
+  const prov = packageProvenance();
   return NextResponse.json(
     {
       status: h.healthy ? 'ok' : 'misconfigured',
@@ -93,6 +115,14 @@ export async function GET() {
       // indistinguishable from a fresh one. A public commit hash is not
       // sensitive; null when the deployment recorded none.
       commit: process.env.WATSON_DEPLOYED_SHA?.trim() || null,
+      // 021G-3: `commit` above is an APP SETTING and is therefore mutable from
+      // outside the artefact — the deploy guard writes it before it restarts, so
+      // it cannot be evidence about which bundle is running. The two fields
+      // below come from inside the package and change only when the package
+      // does, which is what makes a stale mount detectable.
+      packageCommit: prov.packageSha,
+      packageBuildId: prov.packageBuildId,
+      packageBuiltAt: prov.builtAt,
       environment: process.env.WATSON_ENVIRONMENT?.trim() || 'unspecified'
     },
     { status: h.healthy ? 200 : 503, headers: { 'Cache-Control': 'no-store' } }

@@ -246,7 +246,7 @@ export async function runRbacDirectoryPolicyTests(): Promise<{ pass: number; fai
       'run tests and static validation', 'build from the current source',
       'verify the build corresponds to the current source', 'package the verified build',
       'verify package contents and absence of runtime state', 'deploy the package',
-      'restart to remount the package', 'poll until the worker serves the expected SHA',
+      'restart to remount the package', 'poll every active worker for the package-embedded fingerprint',
       'verify deployed posture'
     ];
     const idx = order.map((o) => g.indexOf(o));
@@ -266,8 +266,12 @@ export async function runRbacDirectoryPolicyTests(): Promise<{ pass: number; fai
     check('the guard restarts to remount run-from-package', /az webapp restart/.test(g));
     check('the guard distinguishes accepted from active',
       /deploymentAccepted/.test(g) && /deploymentActive/.test(g));
+    // 021G-3 strengthened this: the guard no longer accepts the app-setting SHA
+    // as proof a rollout is live, so the assertion now demands the PACKAGE
+    // fingerprint check rather than merely "some SHA comparison exists".
     check('the guard fails on a served-SHA mismatch',
-      /served \$\{?.*\}? != package|servedSha|shaMatch/.test(g) && /never converged/.test(g));
+      /shaMatch/.test(g) && /not every worker converged on the package fingerprint/.test(g) &&
+      /running package \$\{h\.packageCommit\} != HEAD/.test(g));
 
     // Other mandated guarantees.
     check('the guard refuses a dirty working tree', /uncommitted changes/.test(g));

@@ -166,4 +166,15 @@ export function messageFor(reason: RefusalReason): { message: string; nextAction
   }
 }
 
-export const NO_STORE = { headers: { 'Cache-Control': 'no-store' } } as const;
+// 021G-3: every RBAC response names the worker that produced it.
+// Proving cross-worker behaviour requires knowing WHICH worker answered, and
+// stamping it here covers every RBAC route on both the success and refusal paths
+// rather than relying on nine routes each remembering to do it. The value is a
+// truncated App Service instance hash: not a secret, not tenant data, and not
+// usable to reach that instance directly.
+export const NO_STORE = {
+  headers: {
+    'Cache-Control': 'no-store',
+    'x-watson-worker': (process.env.WEBSITE_INSTANCE_ID ?? 'local').slice(0, 12)
+  }
+} as const;
