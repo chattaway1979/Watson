@@ -313,7 +313,7 @@ step('record the deployed SHA app setting (after convergence)', () => {
 });
 
 // -------------------------------------------------- 12. authenticated posture
-step('verify deployed posture', () => {
+const posture = step('verify deployed posture', () => {
   if (DRY) return 'dry-run: not verified';
   // Re-read: recording the app setting restarted the app, so `served.body` is a
   // pre-restart observation and must not be reused as the final posture.
@@ -325,10 +325,20 @@ step('verify deployed posture', () => {
   if (h.environment !== 'staging-021c2') fail(`unexpected environment ${h.environment}`);
   if (h.liveExecutionEnabled !== false) fail('live execution is enabled — refusing to accept this deployment');
   // Easy Auth must still reject anonymous access to a privileged route.
-  const code = sh(`curl -s -o /dev/null -w "%{http_code}" --max-time 25 https://${APP}.azurewebsites.net/admin/access-and-roles`);
-  if (code !== '401') fail(`anonymous access to the admin page returned ${code}, expected 401`);
+  // Retried: a transient curl/network failure during the post-restart settle is
+  // not an access-control finding, and treating it as one fails a good rollout.
+  // What must never be tolerated is a NON-401 answer, which is a real finding.
+  let code = null;
+  for (let i = 0; i < 6; i++) {
+    try { code = sh(`curl -s -o /dev/null -w "%{http_code}" --max-time 25 https://${APP}.azurewebsites.net/admin/access-and-roles`); } catch { code = null; }
+    if (code === '401') break;
+    if (code && code !== '401') fail(`anonymous access to the admin page returned ${code}, expected 401`);
+    execSync('powershell -NoProfile -Command "Start-Sleep -Seconds 5"', { stdio: 'ignore' });
+  }
+  if (code !== '401') fail('anonymous access check never completed — could not confirm a 401');
   return { authMode: h.authMode, liveRead: h.liveReadGateEnabled, liveExec: h.liveExecutionEnabled,
-    anonymous: code, appSettingSha: h.commit, packageSha: h.packageCommit, packageBuildId: h.packageBuildId };
+    anonymous: code, appSettingSha: h.commit, packageSha: h.packageCommit, packageBuildId: h.packageBuildId,
+    workerAnswering: h.workerId, rbacStore: h.rbacStore };
 });
 
 // ---------------------------------------------------------------- verdict
@@ -342,11 +352,14 @@ const result = {
   expectedSha: sha?.head ?? null,
   // Reported separately on purpose: an app setting is not evidence about the
   // running bundle, and conflating the two is the defect 021G-3 exposed.
-  appSettingSha: served?.body?.commit ?? null,
-  packageSha: served?.body?.packageCommit ?? null,
-  packageBuildId: served?.body?.packageBuildId ?? null,
+  // Taken from the POSTURE step, which re-reads health after the app-setting write
+  // restarts the app. `served.body` is a pre-restart observation and would report
+  // a stale app-setting SHA here.
+  appSettingSha: posture?.appSettingSha ?? served?.body?.commit ?? null,
+  packageSha: posture?.packageSha ?? served?.body?.packageCommit ?? null,
+  packageBuildId: posture?.packageBuildId ?? served?.body?.packageBuildId ?? null,
   workersObserved: served?.ids ?? null,
-  shaMatch: Boolean(sha?.head && served?.body?.packageCommit && sha.head === served.body.packageCommit),
+  shaMatch: Boolean(sha?.head && posture?.packageSha && sha.head === posture.packageSha),
   deploymentId: deployment?.deploymentId ?? null,
   environment: served?.environment ?? null,
   failure: failed,

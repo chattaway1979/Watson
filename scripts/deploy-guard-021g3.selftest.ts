@@ -148,7 +148,12 @@ export async function runDeployGuardTests(): Promise<{ pass: number; fail: numbe
     check('the verdict reports app-setting SHA and package SHA as SEPARATE claims',
       /appSettingSha:/.test(g) && /packageSha:/.test(g));
     check('shaMatch is computed from the package, not the app setting',
-      /shaMatch: Boolean\(sha\?\.head && served\?\.body\?\.packageCommit/.test(g));
+      /shaMatch: Boolean\(sha\?\.head && posture\?\.packageSha && sha\.head === posture\.packageSha\)/.test(g));
+    check('the verdict reports the POST-restart reading, not a pre-restart body',
+      /appSettingSha: posture\?\.appSettingSha/.test(g));
+    check('a transient anonymous-check failure is retried, but a non-401 still fails',
+      /anonymous access check never completed/.test(g) &&
+      /if \(code && code !== '401'\) fail/.test(g));
     check('the posture step checks the running package against HEAD',
       /running package \$\{h\.packageCommit\} != HEAD/.test(g));
     check('the old hollow check is gone',
