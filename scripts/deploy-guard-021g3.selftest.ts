@@ -246,10 +246,22 @@ export async function runDeployGuardTests(): Promise<{ pass: number; fail: numbe
     // every build, so an unrelated rebuild would fail a healthy cutover. Inside a
     // DEPLOY the artefact checked IS the one just built, so there BUILD_ID is
     // correct — the two scripts legitimately differ here.
-    check('the cutover checks the package SHA against HEAD, not a local BUILD_ID',
-      /packageSha: head/.test(c) && !/packageSha: prov\?\.sha/.test(c));
+    check('the cutover does NOT verify against a local build artefact',
+      !/packageSha: prov\?\.sha/.test(c) && !/standalone', 'watson-build\.json'/.test(c),
+      'a local rebuild mints a new BUILD_ID and would fail a healthy cutover');
     check('BUILD_ID can still be pinned explicitly when the artefact is known',
       /--expect-build-id/.test(c));
+    // The safety property for a cutover is that the running code does not change
+    // while the store setting does. Verifying against the CURRENTLY DEPLOYED
+    // package expresses that; demanding equality with HEAD would merely refuse
+    // the legitimate case of cutting over a previously deployed build.
+    check('the cutover captures the deployed package SHA as its baseline',
+      /baseline = health\('baseline'\)\.packageCommit/.test(c));
+    check('the cutover refuses to proceed if it cannot read the deployed package',
+      /refusing to cut over blind/.test(c));
+    check('an exact package can be pinned with --expect-sha', /--expect-sha/.test(c));
+    check('the cutover records whether the deployed package matches HEAD',
+      /matchesHead/.test(c));
     check('the deploy guard, by contrast, DOES require BUILD_ID equality',
       /packageBuildId === expected\.packageBuildId/.test(readFileSync('scripts/deploy-staging.mjs', 'utf8')));
   }

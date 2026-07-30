@@ -102,9 +102,24 @@ const expectedSha = step('validate inputs and read the expected package fingerpr
   // inside a deploy (where the artefact being checked IS the one just built) and
   // the wrong one here. It can still be pinned explicitly when a caller knows the
   // exact artefact it expects.
+  //
+  // The package to verify against is the one CURRENTLY DEPLOYED, captured here
+  // before anything changes. The safety property for a cutover is that the store
+  // switch does not alter the running code: flipping a setting must never
+  // coincide with a different bundle being mounted. Demanding equality with HEAD
+  // instead would refuse the legitimate case of cutting over a previously
+  // deployed build, which is not a safety win — it is just a false alarm.
+  // --expect-sha pins an exact package when the caller knows which it wants.
   const explicitBuildId = argOf('--expect-build-id', null);
+  const pinned = argOf('--expect-sha', null);
+  let baseline = pinned;
+  if (!baseline && !DRY) {
+    try { baseline = health('baseline').packageCommit ?? null; } catch { baseline = null; }
+    if (!baseline) fail('could not read the currently deployed package SHA — refusing to cut over blind');
+  }
   return { target: TARGET, expectedStore: EXPECTED_STORE[TARGET], head,
-    packageSha: head, packageBuildId: explicitBuildId, finalWorkers: FINAL_WORKERS };
+    packageSha: baseline ?? head, packageBuildId: explicitBuildId,
+    matchesHead: (baseline ?? head) === head, finalWorkers: FINAL_WORKERS };
 });
 
 // ------------------------------------------------- 1. refuse an unsafe switch
