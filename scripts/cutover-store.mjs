@@ -33,8 +33,6 @@
  * It prints a machine-readable verdict and never prints a secret.
  * ============================================================ */
 import { execSync } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
 
 const APP = 'watson-pilot-hrnp01';
 const RG = 'watson-nonprod-rg';
@@ -96,13 +94,17 @@ const expectedSha = step('validate inputs and read the expected package fingerpr
   if (!TARGET || !EXPECTED_STORE[TARGET]) fail('--to must be postgres or json');
   if (!Number.isFinite(FINAL_WORKERS) || FINAL_WORKERS < 1) fail('--final-workers must be >= 1');
   const head = sh('git rev-parse HEAD');
-  // Prefer the built artefact's provenance; fall back to HEAD when this is run
-  // without a local build (the running package still has to match SOMETHING
-  // committed, and the verify step below is what enforces it).
-  const f = path.join(process.cwd(), '.next', 'standalone', 'watson-build.json');
-  const prov = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null;
+  // A cutover is a CONFIGURATION change, not a deployment, so what must be true
+  // is that the running package corresponds to the committed source — its SHA.
+  // BUILD_ID is deliberately NOT required to match a local build: Next.js mints a
+  // new BUILD_ID on every build, so an unrelated local rebuild would otherwise
+  // make a perfectly healthy cutover fail. BUILD_ID is the right fingerprint
+  // inside a deploy (where the artefact being checked IS the one just built) and
+  // the wrong one here. It can still be pinned explicitly when a caller knows the
+  // exact artefact it expects.
+  const explicitBuildId = argOf('--expect-build-id', null);
   return { target: TARGET, expectedStore: EXPECTED_STORE[TARGET], head,
-    packageSha: prov?.sha ?? head, packageBuildId: prov?.buildId ?? null, finalWorkers: FINAL_WORKERS };
+    packageSha: head, packageBuildId: explicitBuildId, finalWorkers: FINAL_WORKERS };
 });
 
 // ------------------------------------------------- 1. refuse an unsafe switch

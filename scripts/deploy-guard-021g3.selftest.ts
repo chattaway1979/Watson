@@ -241,6 +241,17 @@ export async function runDeployGuardTests(): Promise<{ pass: number; fail: numbe
       /ids\.size === 1 && instanceCount\(\) === 1/.test(c));
     check('the cutover script never prints a secret',
       !/password|--admin-password|accessToken/i.test(c));
+    // A cutover verifies the running package matches the COMMITTED SOURCE. It must
+    // not demand BUILD_ID equality with a local build: Next mints a new BUILD_ID
+    // every build, so an unrelated rebuild would fail a healthy cutover. Inside a
+    // DEPLOY the artefact checked IS the one just built, so there BUILD_ID is
+    // correct — the two scripts legitimately differ here.
+    check('the cutover checks the package SHA against HEAD, not a local BUILD_ID',
+      /packageSha: head/.test(c) && !/packageSha: prov\?\.sha/.test(c));
+    check('BUILD_ID can still be pinned explicitly when the artefact is known',
+      /--expect-build-id/.test(c));
+    check('the deploy guard, by contrast, DOES require BUILD_ID equality',
+      /packageBuildId === expected\.packageBuildId/.test(readFileSync('scripts/deploy-staging.mjs', 'utf8')));
   }
 
   console.log('\n[139] Cold-start store probe — bounded, but no false unhealthy (021G-3)');
