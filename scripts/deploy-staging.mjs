@@ -184,14 +184,32 @@ step('verify package contents and absence of runtime state', () => {
 // ---------------------------------------------------------------- 8. deploy
 const deployment = step('deploy the package', () => {
   if (DRY) return 'dry-run: not deployed';
-  // Provenance is written BEFORE the deploy so the app can never advertise a SHA
-  // for code it is not serving; step 11 then proves the two agree.
-  execSync(`az webapp config appsettings set -n ${APP} -g ${RG} --settings WATSON_DEPLOYED_SHA=${sha.head}`,
-    { stdio: 'ignore' });
+  // 021G-3: the app-setting SHA is NOT written here. It used to be, with a comment
+  // claiming that stopped the app advertising a SHA for code it was not serving —
+  // exactly backwards. Writing it before the remount is what CREATED that window:
+  // health reported the new SHA while the old package answered. It is now written
+  // only after every worker has been proven to run the new package, so the setting
+  // can never be ahead of the artefact.
   const out = sh(`az webapp deploy --resource-group ${RG} --name ${APP} --src-path "${pkg.zip}" --type zip --async false`);
   const m = out.match(/"deploymentId":\s*"([^"]+)"/);
-  if (!/RuntimeSuccessful/.test(out)) fail('deployment did not report RuntimeSuccessful');
-  return { deploymentId: m ? m[1] : 'unknown', accepted: true };
+  // `az webapp deploy` does not always echo RuntimeSuccessful even when the
+  // deployment succeeds, so a missing string is not evidence of failure. Confirm
+  // against the deployments API, which is authoritative, before giving up.
+  if (!/RuntimeSuccessful/.test(out)) {
+    let confirmed = false;
+    for (let i = 0; i < 12 && !confirmed; i++) {
+      try {
+        const list = JSON.parse(sh(`az rest --method GET --uri "https://${APP}.scm.azurewebsites.net/api/deployments?$top=1" --resource https://management.core.windows.net/`));
+        const d = Array.isArray(list) ? list[0] : null;
+        // status 4 == Success in the Kudu deployment model.
+        if (d && d.complete === true && Number(d.status) === 4) confirmed = true;
+      } catch { /* SCM may be restarting */ }
+      if (!confirmed) execSync('powershell -NoProfile -Command "Start-Sleep -Seconds 5"', { stdio: 'ignore' });
+    }
+    if (!confirmed) fail('deployment reported neither RuntimeSuccessful nor a successful deployment record');
+    return { deploymentId: m ? m[1] : 'unknown', accepted: true, confirmedVia: 'deployments-api' };
+  }
+  return { deploymentId: m ? m[1] : 'unknown', accepted: true, confirmedVia: 'runtime-successful' };
 });
 
 // ------------------------------------- 9. remount (run-from-package requires)
@@ -273,10 +291,33 @@ step('verify all workers agree on the package fingerprint', () => {
   return { distinctWorkers: [...new Set(bodies.map((b) => b.workerId))], packageBuildId: buildIds[0], store: stores[0] };
 });
 
+// ----------------------------- 11b. bookkeeping AFTER the package is proven live
+// Deliberately last. This setting is convenience metadata, not evidence: it is
+// mutable from outside the artefact, and writing it before the remount is what
+// produced the stale-bundle false pass in the first place.
+step('record the deployed SHA app setting (after convergence)', () => {
+  if (DRY) return 'dry-run: not recorded';
+  execSync(`az webapp config appsettings set -n ${APP} -g ${RG} --settings WATSON_DEPLOYED_SHA=${sha.head}`,
+    { stdio: 'ignore' });
+  // Changing an app setting restarts the app, so convergence on the PACKAGE has
+  // to be re-established before the posture check reads health again.
+  const deadline = Date.now() + 300_000;
+  while (Date.now() < deadline) {
+    try {
+      const h = JSON.parse(sh(`curl -s --max-time 20 "${HEALTH}?rec=${Date.now()}"`));
+      if (h.packageCommit === sha.head && h.commit === sha.head) return { appSettingSha: h.commit, packageSha: h.packageCommit };
+    } catch { /* restarting */ }
+    execSync('powershell -NoProfile -Command "Start-Sleep -Seconds 5"', { stdio: 'ignore' });
+  }
+  fail('the app setting was recorded but the app did not settle with both SHAs matching');
+});
+
 // -------------------------------------------------- 12. authenticated posture
 step('verify deployed posture', () => {
   if (DRY) return 'dry-run: not verified';
-  const h = served.body;
+  // Re-read: recording the app setting restarted the app, so `served.body` is a
+  // pre-restart observation and must not be reused as the final posture.
+  const h = JSON.parse(sh(`curl -s --max-time 25 "${HEALTH}?posture=${Date.now()}"`));
   // Both are checked and they are NOT the same claim. The package fingerprint is
   // the one that proves which code is running.
   if (h.packageCommit !== sha.head) fail(`running package ${h.packageCommit} != HEAD ${sha.head}`);

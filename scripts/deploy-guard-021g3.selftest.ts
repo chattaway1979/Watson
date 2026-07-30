@@ -153,6 +153,18 @@ export async function runDeployGuardTests(): Promise<{ pass: number; fail: numbe
       /running package \$\{h\.packageCommit\} != HEAD/.test(g));
     check('the old hollow check is gone',
       !/if \(h\.commit === sha\.head\) return h;/.test(g));
+    // The ORDERING defect: writing the app setting before the remount is what
+    // created the window in which health advertised a SHA the workers were not
+    // serving. It must now happen only after convergence has been proven.
+    check('the app-setting SHA is written AFTER convergence, not before the deploy',
+      g.indexOf('poll every active worker') < g.indexOf('WATSON_DEPLOYED_SHA=${sha.head}'));
+    check('the deploy step no longer writes the app-setting SHA',
+      !/deploy the package[\s\S]{0,400}WATSON_DEPLOYED_SHA/.test(g));
+    check('a missing RuntimeSuccessful string is confirmed against the deployments API',
+      /neither RuntimeSuccessful nor a successful deployment record/.test(g) &&
+      /Number\(d\.status\) === 4/.test(g));
+    check('the posture check re-reads health after the setting write restarts the app',
+      /posture=\$\{Date\.now\(\)\}/.test(g));
 
     // Provenance generation must be part of the build, or the artefact ships
     // without the very thing the guard depends on.
