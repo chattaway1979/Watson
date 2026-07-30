@@ -154,6 +154,28 @@ export async function runBluebeamAdversarialTests(): Promise<{ pass: number; fai
     check('licensing vs sign-in stay in one family',
       classifyScenario('Bluebeam says I am not licensed') === classifyScenario('I cannot sign in to Bluebeam'));
 
+    // 021G-5 REGRESSION. "mic" is a substring of "Microsoft", so an includes()
+    // cue sent EVERY message naming "Microsoft Teams" to the iPad camera/
+    // microphone scenario. A Windows performance complaint was answered with a
+    // broken-iPad-app diagnosis, invented camera/microphone evidence and
+    // "confidence: high", and that wrong summary was written onto the durable
+    // case a technician reads. Found in the live pilot, not by inspection.
+    check('"Microsoft Teams" does NOT match the mic/camera cue',
+      classifyScenario('My Windows computer is running slowly and Microsoft Teams keeps freezing.') === 'device_slow_storage',
+      classifyScenario('My Windows computer is running slowly and Microsoft Teams keeps freezing.'));
+    check('a slow Windows PC mentioning Microsoft 365 is a performance issue',
+      classifyScenario('My PC is really slow since the Microsoft 365 update') === 'device_slow_storage',
+      classifyScenario('My PC is really slow since the Microsoft 365 update'));
+    check('a GENUINE Teams mic problem still reaches the AV scenario',
+      classifyScenario('My mic is not working in Teams') === 'teams_ipad_av',
+      classifyScenario('My mic is not working in Teams'));
+    check('a genuine Teams camera problem still reaches the AV scenario',
+      classifyScenario('Teams camera not working on my iPad') === 'teams_ipad_av',
+      classifyScenario('Teams camera not working on my iPad'));
+    check('"microphone" spelled out still reaches the AV scenario',
+      classifyScenario('Teams cannot find my microphone') === 'teams_ipad_av',
+      classifyScenario('Teams cannot find my microphone'));
+
     // Ambiguity must be DETECTED, not silently resolved.
     check('mixed complaint is flagged ambiguous',
       bluebeamIsAmbiguous('Bluebeam printing is wrong and my measurements are off') === true);

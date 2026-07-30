@@ -586,7 +586,12 @@ export function decideApproval(actor: Actor, caseId: string, decision: 'approve'
   c.approval.state = 'granted';
   c.state = 'technician_working';
   auditCase(actor, 'employee_approval_granted', c);
-  const msg = 'Thank you. I will make the change now.';
+  // Same reasoning as the completion message below: while live execution is
+  // disabled, "I will make the change now" promises an action that will not happen.
+  const liveExecutionOnApproval = (process.env.IT_AGENT_LIVE_EXTERNAL_EXECUTION ?? 'false').toLowerCase() === 'true';
+  const msg = liveExecutionOnApproval
+    ? 'Thank you. I will make the change now.'
+    : 'Thank you. I will walk through this as a simulation — no change will be made to your device.';
   watsonSay(c, msg);
   touch(c);
   return { case: c, reply: msg };
@@ -620,7 +625,18 @@ export function runSimulatedRepair(actor: Actor, caseId: string): WatsonTurn | n
   c.verification.systemVerified = true;   // system-level check passes in the mock
   auditCase(actor, 'simulated_action_completed', c, { action: action.key });
   auditCase(actor, 'verification_requested', c);
-  const msg = `That is done. ${action.verificationSteps[0]} — is it working now?`;
+  // 021G-5: say WHICH kind of "done" this is.
+  // This whole path is the simulated repair — the audit event above is literally
+  // `simulated_action_completed`, and no device is touched while live execution
+  // is disabled. The code knew that; the sentence did not. "That is done." reads
+  // to an employee as a completed repair, which is the single most misleading
+  // thing a pilot can say, and it was said before the user had answered anything.
+  // The wording now follows the gate, so it stays correct if live execution is
+  // ever turned on.
+  const liveExecution = (process.env.IT_AGENT_LIVE_EXTERNAL_EXECUTION ?? 'false').toLowerCase() === 'true';
+  const msg = liveExecution
+    ? `That is done. ${action.verificationSteps[0]} — is it working now?`
+    : `Simulated only — nothing on your device was changed. If this had run for real: ${action.verificationSteps[0]} — does that match what you are seeing?`;
   watsonSay(c, msg);
   touch(c);
   return { case: c, reply: msg };

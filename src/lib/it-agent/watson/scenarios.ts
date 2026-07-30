@@ -307,6 +307,15 @@ export const SCENARIOS: Record<ScenarioKey, ScenarioDef> = {
 export function classifyScenario(text: string): ScenarioKey {
   const t = text.toLowerCase();
   const has = (...ws: string[]) => ws.some((w) => t.includes(w));
+  // Whole-word matching for cues that are SUBSTRINGS OF COMMON WORDS.
+  // "mic" lives inside "Microsoft", so a plain includes() sent every message
+  // mentioning "Microsoft Teams" to the iPad camera/microphone scenario — a
+  // Windows performance complaint came back diagnosed as a broken iPad app,
+  // with fabricated camera/microphone evidence and "confidence: high", and the
+  // wrong summary was written onto the durable case a technician then reads.
+  // Short cues must be matched as words, not as fragments.
+  const hasWord = (...ws: string[]) =>
+    ws.some((w) => new RegExp(`(^|[^a-z0-9])${w}([^a-z0-9]|$)`, 'i').test(t));
   // Bluebeam FIRST. Without this, "Bluebeam is slow" matches the generic `slow`
   // rule below and is misdiagnosed as a Windows storage problem.
   const bb = classifyBluebeamScenarioKey(text);
@@ -314,7 +323,8 @@ export function classifyScenario(text: string): ScenarioKey {
   if (has('lost', 'stolen', 'misplaced', "can't find my laptop", 'left my laptop', 'left my phone')) return 'lost_device';
   if (has('outlook') && has('sign in', 'sign-in', 'signin', 'log in', 'login', 'password prompt', 'keeps asking')) return 'outlook_repeated_signin';
   if (has('sharepoint', 'share point', 'project file', 'project folder', 'site access', 'access denied to')) return 'sharepoint_access';
-  if (has('teams') && has('camera', 'mic', 'microphone', 'video')) return 'teams_ipad_av';
+  // 'microphone', 'camera', 'video', 'webcam' are safe as substrings; 'mic' is not.
+  if (has('teams') && (has('camera', 'microphone', 'video', 'webcam') || hasWord('mic', 'av'))) return 'teams_ipad_av';
   if (has('onedrive', 'one drive') && has('sync', 'syncing', 'not updating')) return 'onedrive_sync';
   if (has('slow', 'freezing', 'low on storage', 'out of space', 'no space', 'storage full', 'lagging')) return 'device_slow_storage';
   if (has('outlook', 'email', 'mailbox')) return 'outlook_repeated_signin';

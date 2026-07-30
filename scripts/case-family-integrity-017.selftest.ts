@@ -250,5 +250,30 @@ export async function runCaseFamilyIntegrityTests(): Promise<{ pass: number; fai
       classifyScenario(correctionTargetText('The real issue is that Bluebeam says I am not licensed.') ?? '') === 'bluebeam_signin_licensing');
   }
 
+  console.log('\n[141] Pilot honesty — a simulated repair is not described as a real one (021G-5)');
+  {
+    const { readFileSync } = await import('node:fs');
+    const e = readFileSync('src/lib/it-agent/watson/engine.ts', 'utf8');
+    // Found by running the pilot, not by inspection. With live execution
+    // disabled, Watson still said "I will make the change now" and then
+    // "That is done." — which an employee reads as a completed repair, and it
+    // was said before they had answered anything. The engine already KNEW the
+    // run was simulated (the audit event is `simulated_action_completed`); the
+    // sentence simply did not say so. Wording now follows the gate, so it stays
+    // correct if live execution is ever enabled.
+    check('the approval message follows the live-execution gate',
+      /liveExecutionOnApproval/.test(e) && /no change will be made to your device/.test(e));
+    check('the completion message follows the live-execution gate',
+      /const liveExecution = \(process\.env\.IT_AGENT_LIVE_EXTERNAL_EXECUTION/.test(e));
+    check('the simulated path never bare-asserts a completed repair',
+      !/const msg = `That is done\./.test(e));
+    check('the simulated completion states nothing was changed',
+      /nothing on your device was changed/.test(e));
+    check('the real wording is retained for when live execution IS enabled',
+      /That is done\. \$\{action\.verificationSteps\[0\]\}/.test(e));
+    check('the completion is still audited as simulated',
+      /simulated_action_completed/.test(e));
+  }
+
   return { pass, fail, failures };
 }
