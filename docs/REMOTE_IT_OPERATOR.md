@@ -46,3 +46,34 @@ Elevated (defined, **not** pilot-executable): `reset_user_password`.
 
 ## Verdict
 Watson can now **inspect → diagnose → remediate → verify → escalate** through a real, provider-neutral endpoint seam — proven end-to-end against a labelled simulator. It is no longer only a chatbot in architecture; it is not yet proven against a real managed device (adapter + consented pilot required).
+
+
+## Adversarial review (feat/remote-it-operator-v1)
+Reviewed for: arbitrary shell, param command injection, approval/risk downgrade, tenant/actor confusion,
+self-approval, false resolution, missing verification, sim-as-real, secrets in logs, replay/duplicate
+execution, timeout races, cancellation, audit gaps, elevated behaviour, canned UI.
+
+Material findings fixed on-branch:
+1. **Approval replay / duplicate execution** — `approvalId` was reusable. Approvals are now **single-use**
+   (`consumeApproval`, consumed by the executor before the port is touched; replays denied `approval_replayed`).
+2. **Employee consent integrity** — employee-level approval now requires **self-consent** (the device owner
+   grants it; category `self_consent_required`), not just any employee.
+3. **Real/simulated audit distinction** — execution + verification events now record `provider` + `simulated`
+   so real and simulated results can never be confused in the audit trail.
+Regression tests added (self-test section [15]); suite now 73/73.
+
+## Real endpoint pilot status: **BLOCKED** (no safe non-production path available)
+- **RMM:** none configured (no NinjaOne/Atera/RMM API credentials in env, config, or repo).
+- **Intune/Graph device actions:** app Graph roles are read-only `User.Read.All` + `UserAuthenticationMethod.Read.All`
+  only — **no** device-management scopes. Would require expanding production Graph/Entra permissions (owner hard stop).
+- **Local non-prod test device:** none exists; the only reachable Windows machine is an employee production computer
+  (prohibited to touch).
+
+**To unblock, the owner must provide exactly one of:**
+1. An existing **RMM** (NinjaOne/Atera/etc.) with an API token + one enrolled **non-production** Windows test device; **or**
+2. Explicit approval to add **Intune device-management Graph scopes** (`DeviceManagementManagedDevices.Read.All`,
+   and a device-action scope for restart) to a **non-production** app registration, plus one enrolled test device; **or**
+3. A **designated non-production Windows test computer** (marked + isolated from employee production workloads) on which a
+   fail-closed local adapter may run typed, pre-reviewed commands.
+
+The provider-neutral `EndpointOperationsPort` seam is ready — connecting any of the above is an adapter, not a redesign.

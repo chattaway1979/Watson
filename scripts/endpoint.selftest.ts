@@ -199,6 +199,25 @@ async function main() {
     check('cross-tenant action denied', canPerformAction(EMP_OTHER_TENANT, req, dev, false).category === 'tenant_mismatch');
   }
 
+  console.log('\n[15] Replay / duplicate execution + consent integrity + audit provenance');
+  {
+    __resetEventsForTests(); __resetApprovalsForTests();
+    const sim = createSimulator(); sim.seedDevice('userA', device('process_hang'), 'process_hang');
+    const exec = createExecutor(sim);
+    const wcase: WatsonCase = { caseId: 'cR', tenantId: 't1', complaint: '', playbookId: 'x', actor: EMP, device: device('process_hang'), state: 'executing', evidence: [], hypotheses: [], actions: [], question: null, createdAt: '', updatedAt: '', canceled: false, simulated: true };
+    const g = grantApproval({ caseId: 'cR', actionId: 'restart_teams', requesterActorId: EMP.actorId, grantedBy: EMP });
+    const apr = g.ok ? g.approval.approvalId : '';
+    const first = await exec.runAction(EMP, wcase, 'restart_teams', {}, apr);
+    const second = await exec.runAction(EMP, wcase, 'restart_teams', {}, apr);
+    check('first execution succeeds', first.status === 'succeeded');
+    check('replayed approval is rejected (no duplicate execution)', second.status === 'denied' && second.reason === 'approval_replayed');
+    const other: Actor = { actorId: 'userB', tenantId: 't1', authority: 'employee' };
+    check('another employee cannot grant consent for this action (self-consent required)', grantApproval({ caseId: 'cR', actionId: 'restart_teams', requesterActorId: EMP.actorId, grantedBy: other }).ok === false);
+    const evts = eventsForCase('cR');
+    const started = evts.find((e) => e.type === 'action_executed' && (e.data as { phase?: string }).phase === 'started');
+    check('execution audit records provider + simulated', (started?.data as { provider?: string })?.provider === 'simulator' && (started?.data as { simulated?: boolean })?.simulated === true);
+  }
+
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
   if (fail === 0) { await demos(); }
   if (fail > 0) { console.log('\nFailures:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }

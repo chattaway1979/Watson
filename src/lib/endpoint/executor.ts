@@ -13,7 +13,7 @@ import type {
   ActionRequest, ActionResult, WatsonCase, VerificationStatus
 } from './contracts';
 import { getAction } from './catalog';
-import { canCollectEvidence, canPerformAction } from './policy';
+import { canCollectEvidence, canPerformAction, consumeApproval } from './policy';
 import { appendEvent } from './events';
 
 let counter = 0;
@@ -101,7 +101,8 @@ export function createExecutor(port: EndpointOperationsPort): Executor {
       appendEvent({ caseId: wcase.caseId, tenantId: wcase.tenantId, type: 'action_denied', actorId: actor.actorId, actorAuthority: actor.authority, deviceId: wcase.device?.deviceId, data: { actionId, category: 'not_in_pilot', riskTier: def.riskTier } });
       return { requestId, status: 'denied', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), evidence: [], verificationStatus: 'not_run', reason: 'elevated_not_in_pilot' };
     }
-    appendEvent({ caseId: wcase.caseId, tenantId: wcase.tenantId, type: 'action_executed', actorId: actor.actorId, actorAuthority: actor.authority, deviceId: wcase.device?.deviceId, data: { actionId, phase: 'started', changesDevice: def.changesDevice, approvalId: approvalId ?? null } });
+    appendEvent({ caseId: wcase.caseId, tenantId: wcase.tenantId, type: 'action_executed', actorId: actor.actorId, actorAuthority: actor.authority, deviceId: wcase.device?.deviceId, data: { actionId, phase: 'started', changesDevice: def.changesDevice, approvalId: approvalId ?? null, provider: port.providerId, simulated: port.simulated } });
+    if (approvalId) consumeApproval(approvalId); // single-use: prevents replay / duplicate execution
 
     const raced = await withTimeout(port.executeAction(request), def.timeoutSeconds);
     if (raced.timedOut) {
@@ -112,7 +113,7 @@ export function createExecutor(port: EndpointOperationsPort): Executor {
     // Mandatory verification (deterministic, from fresh evidence).
     const verification = base.status === 'succeeded' ? await verify(actor, wcase, actionId, true) : 'not_run';
     const result: ActionResult = { ...base, requestId, verificationStatus: verification };
-    appendEvent({ caseId: wcase.caseId, tenantId: wcase.tenantId, type: 'verification_completed', actorId: actor.actorId, actorAuthority: actor.authority, deviceId: wcase.device?.deviceId, data: { actionId, actionStatus: result.status, verificationStatus: verification } });
+    appendEvent({ caseId: wcase.caseId, tenantId: wcase.tenantId, type: 'verification_completed', actorId: actor.actorId, actorAuthority: actor.authority, deviceId: wcase.device?.deviceId, data: { actionId, actionStatus: result.status, verificationStatus: verification, provider: port.providerId, simulated: port.simulated } });
     return result;
   }
 

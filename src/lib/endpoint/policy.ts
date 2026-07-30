@@ -6,6 +6,7 @@
 // executable content: parameters are typed + allowlisted, and any
 // command-like value is rejected. Risk and approval floors are
 // enforced in code and cannot be downgraded by a request.
+// Approvals are SINGLE-USE (no replay / duplicate execution).
 // ============================================================
 import type {
   Actor, Authority, ActionDefinition, ActionRequest, EndpointDevice, ApprovalLevel, ParameterSpec
@@ -14,7 +15,7 @@ import { getAction, isAllowlistedAction, isAllowedEvidenceType } from './catalog
 
 export interface PolicyDecision {
   allowed: boolean;
-  reason: string;      // safe category, employee-neutral
+  reason: string;
   category:
     | 'permitted'
     | 'unknown_action'
@@ -29,22 +30,21 @@ export interface PolicyDecision {
     | 'command_injection_blocked'
     | 'approval_required'
     | 'invalid_approval'
+    | 'approval_replayed'
     | 'self_approval_blocked'
+    | 'self_consent_required'
     | 'approval_downgrade_blocked';
 }
 
 const AUTHORITY_RANK: Record<Authority, number> = { system: 100, owner: 90, it_approver: 80, employee: 10 };
 const APPROVAL_MIN_RANK: Record<ApprovalLevel, number> = { none: 0, employee: 10, it_approver: 80, owner: 90 };
-
 function rank(a: Authority): number { return AUTHORITY_RANK[a] ?? 0; }
 
-// Any parameter VALUE that looks like a command / script / shell is rejected.
 const COMMAND_LIKE = /(;|\||&&|`|\$\(|<\(|\bpowershell\b|\bcmd\b|\bbash\b|\bInvoke-|\bStart-Process\b|\brm\b\s|\bdel\b\s|\bformat\b|\bnet\s+user\b|\bregedit\b|-EncodedCommand|iex\b|curl\s|wget\s)/i;
 
 // ---- Typed parameter validation ---------------------------
 export function validateParameters(def: ActionDefinition, params: Record<string, unknown>): PolicyDecision {
   const allowed = def.allowedParameters;
-  // Reject any parameter not on the allowlist (deny-by-default for inputs).
   for (const key of Object.keys(params ?? {})) {
     if (!(key in allowed)) {
       return { allowed: false, reason: `parameter '${key}' is not permitted`, category: 'invalid_parameters' };
@@ -57,8 +57,7 @@ export function validateParameters(def: ActionDefinition, params: Record<string,
       return { allowed: false, reason: `missing required parameter '${key}'`, category: 'invalid_parameters' };
     }
     if (!present) continue;
-    const typeOk = checkType(spec, value);
-    if (!typeOk) return { allowed: false, reason: `parameter '${key}' has invalid type`, category: 'invalid_parameters' };
+    if (!checkType(spec, value)) return { allowed: false, reason: `parameter '${key}' has invalid type`, category: 'invalid_parameters' };
     if (spec.type === 'enum' && !(spec.enum ?? []).includes(String(value))) {
       return { allowed: false, reason: `parameter '${key}' is not an allowed value`, category: 'invalid_parameters' };
     }
@@ -84,7 +83,7 @@ function checkType(spec: ParameterSpec, value: unknown): boolean {
   }
 }
 
-// ---- Approvals store (deterministic, in-memory) -----------
+// ---- Approvals store (deterministic, single-use) ----------
 export interface ApprovalGrant {
   approvalId: string;
   caseId: string;
@@ -93,12 +92,11 @@ export interface ApprovalGrant {
   grantedByActorId: string;
   grantedByAuthority: Authority;
   at: string;
+  consumed: boolean;
 }
 
 const APPROVALS = new Map<string, ApprovalGrant>();
 
-// Granting is itself gated: the grantor's authority must satisfy the action's
-// approval level, and privileged approvals cannot be self-granted by the requester.
 export function grantApproval(input: {
   caseId: string; actionId: string; requesterActorId: string; grantedBy: Actor;
 }): { ok: true; approval: ApprovalGrant } | { ok: false; decision: PolicyDecision } {
@@ -107,6 +105,10 @@ export function grantApproval(input: {
   const level = def.approvalLevel;
   if (rank(input.grantedBy.authority) < APPROVAL_MIN_RANK[level]) {
     return { ok: false, decision: { allowed: false, reason: 'approver authority insufficient', category: 'invalid_approval' } };
+  }
+  // Employee-level = the device owner CONSENTS to their own action.
+  if (level === 'employee' && input.grantedBy.actorId !== input.requesterActorId) {
+    return { ok: false, decision: { allowed: false, reason: 'employee consent must be self-granted', category: 'self_consent_required' } };
   }
   // Employees may never approve privileged (it_approver/owner) actions.
   if ((level === 'it_approver' || level === 'owner') && input.grantedBy.authority === 'employee') {
@@ -118,19 +120,22 @@ export function grantApproval(input: {
   }
   const approval: ApprovalGrant = {
     approvalId: `apr_${Math.random().toString(36).slice(2, 10)}`,
-    caseId: input.caseId,
-    actionId: input.actionId,
-    requesterActorId: input.requesterActorId,
-    grantedByActorId: input.grantedBy.actorId,
-    grantedByAuthority: input.grantedBy.authority,
-    at: new Date().toISOString()
+    caseId: input.caseId, actionId: input.actionId, requesterActorId: input.requesterActorId,
+    grantedByActorId: input.grantedBy.actorId, grantedByAuthority: input.grantedBy.authority,
+    at: new Date().toISOString(), consumed: false
   };
   APPROVALS.set(approval.approvalId, approval);
   return { ok: true, approval };
 }
 
-export function getApproval(approvalId: string): ApprovalGrant | undefined {
-  return APPROVALS.get(approvalId);
+export function getApproval(approvalId: string): ApprovalGrant | undefined { return APPROVALS.get(approvalId); }
+
+// Single-use: consuming an approval prevents any replay / duplicate execution.
+export function consumeApproval(approvalId: string): boolean {
+  const g = APPROVALS.get(approvalId);
+  if (!g || g.consumed) return false;
+  g.consumed = true;
+  return true;
 }
 
 export function __resetApprovalsForTests(): void { APPROVALS.clear(); }
@@ -155,16 +160,13 @@ export function canPerformAction(
   device: EndpointDevice | null,
   caseCanceled: boolean
 ): PolicyDecision {
-  // 0) Emergency stop / cancellation.
   if (caseCanceled) return { allowed: false, reason: 'session canceled', category: 'canceled' };
 
-  // 1) Allowlist (deny-by-default).
   if (!isAllowlistedAction(request.actionId)) {
     return { allowed: false, reason: 'action is not on the allowlist', category: 'unknown_action' };
   }
   const def = getAction(request.actionId)!;
 
-  // 2) Device + tenant + assignment binding.
   if (!device) return { allowed: false, reason: 'no device resolved', category: 'device_not_assigned' };
   if (device.tenantId !== actor.tenantId) return { allowed: false, reason: 'tenant mismatch', category: 'tenant_mismatch' };
   if (device.assignedUserId && device.assignedUserId !== actor.actorId && actor.authority === 'employee') {
@@ -173,25 +175,26 @@ export function canPerformAction(
   if (device.managementState === 'unmanaged') return { allowed: false, reason: 'device not managed', category: 'device_unmanaged' };
   if (def.changesDevice && !device.online) return { allowed: false, reason: 'device offline', category: 'device_offline' };
 
-  // 3) Authority floor to REQUEST/queue.
   if (rank(actor.authority) < rank(def.requiredAuthority)) {
     return { allowed: false, reason: 'insufficient authority to request action', category: 'insufficient_authority' };
   }
 
-  // 4) Typed parameter validation (rejects unknown params + command-like values).
   const paramCheck = validateParameters(def, request.parameters ?? {});
   if (!paramCheck.allowed) return paramCheck;
 
-  // 5) Approval floor (cannot be downgraded — level is read from the catalog).
   if (def.approvalLevel !== 'none') {
     if (!request.approvalId) return { allowed: false, reason: 'approval required', category: 'approval_required' };
     const grant = getApproval(request.approvalId);
     if (!grant) return { allowed: false, reason: 'approval not found', category: 'invalid_approval' };
+    if (grant.consumed) return { allowed: false, reason: 'approval already used', category: 'approval_replayed' };
     if (grant.actionId !== def.actionId || grant.caseId !== request.caseId) {
       return { allowed: false, reason: 'approval does not match this action/case', category: 'invalid_approval' };
     }
     if (rank(grant.grantedByAuthority) < APPROVAL_MIN_RANK[def.approvalLevel]) {
       return { allowed: false, reason: 'approver authority insufficient', category: 'approval_downgrade_blocked' };
+    }
+    if (def.approvalLevel === 'employee' && grant.grantedByActorId !== request.actorId) {
+      return { allowed: false, reason: 'employee consent must be self-granted', category: 'self_consent_required' };
     }
     if ((def.approvalLevel === 'it_approver' || def.approvalLevel === 'owner') && grant.grantedByActorId === request.actorId) {
       return { allowed: false, reason: 'self-approval blocked', category: 'self_approval_blocked' };
