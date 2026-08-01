@@ -37,14 +37,15 @@ export interface Executor {
 // ---- Verification predicate evaluators --------------------
 // Each returns true/false from FRESH evidence facts. Unknown predicates
 // fail closed (return false) so verification cannot silently pass.
-type FactBag = { process?: Record<string, unknown>; teams?: Record<string, unknown>; network?: Record<string, unknown> };
+type FactBag = { process?: Record<string, unknown>; teams?: Record<string, unknown>; network?: Record<string, unknown>; sentinel?: Record<string, unknown> };
 
 const PREDICATES: Record<string, (f: FactBag, actionSucceeded: boolean) => boolean> = {
   teams_process_running: (f) => f.process?.state === 'running',
   teams_stable_10s: (f) => f.process?.state === 'running',
   teams_cache_rebuilt: (f) => f.teams?.cacheCorrupt === false,
   intune_sync_acknowledged: (_f, ok) => ok === true,
-  network_healthy: (f) => f.network?.reachable === true
+  network_healthy: (f) => f.network?.reachable === true,
+  sentinel_process_running: (f) => f.sentinel?.present === true
 };
 
 export function createExecutor(port: EndpointOperationsPort): Executor {
@@ -83,6 +84,10 @@ export function createExecutor(port: EndpointOperationsPort): Executor {
       const e = await collectEvidence(actor, wcase, 'network_health');
       facts.network = e.facts;
     }
+    if ([...need].some((p) => p.startsWith('sentinel'))) {
+      const e = await collectEvidence(actor, wcase, 'sentinel_health');
+      facts.sentinel = e.facts;
+    }
     const allPass = def.verification.every((p) => (PREDICATES[p] ? PREDICATES[p](facts, actionSucceeded) : false));
     return allPass ? 'passed' : 'failed';
   }
@@ -96,6 +101,11 @@ export function createExecutor(port: EndpointOperationsPort): Executor {
       return { requestId, status: 'denied', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), evidence: [], verificationStatus: 'not_run', reason: decision.category };
     }
     const def = getAction(actionId)!;
+    // Test-only actions (e.g. sentinel) are refused unless explicitly enabled for a non-production test.
+    if (def.testOnly && (process.env.WATSON_ALLOW_TESTONLY ?? 'false').toLowerCase() !== 'true') {
+      appendEvent({ caseId: wcase.caseId, tenantId: wcase.tenantId, type: 'action_denied', actorId: actor.actorId, actorAuthority: actor.authority, deviceId: wcase.device?.deviceId, data: { actionId, category: 'testonly_not_enabled' } });
+      return { requestId, status: 'denied', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), evidence: [], verificationStatus: 'not_run', reason: 'testonly_not_enabled' };
+    }
     // Pilot safety floor: only LOW-risk actions may execute in this build. Elevated/critical fail closed.
     if (def.riskTier !== 'low') {
       appendEvent({ caseId: wcase.caseId, tenantId: wcase.tenantId, type: 'action_denied', actorId: actor.actorId, actorAuthority: actor.authority, deviceId: wcase.device?.deviceId, data: { actionId, category: 'not_in_pilot', riskTier: def.riskTier } });

@@ -265,8 +265,8 @@ async function main() {
       check('adapter refuses any unmapped / non low-risk action', bad.status === 'failed' && bad.reason === 'unsupported_action');
     }
     const inv = localCommandInventory();
-    check('command inventory is a fixed allowlist', inv.length === 10);
-    check('only restart/clear write to the device', inv.filter((s) => s.writesDevice).map((s) => s.id).sort().join(',') === 'clear_teams_cache,restart_teams');
+    check('command inventory is a fixed allowlist', inv.length === 12);
+    check('only allowlisted low-risk actions write to the device', inv.filter((s) => s.writesDevice).map((s) => s.id).sort().join(',') === 'clear_teams_cache,restart_sentinel_process,restart_teams');
     check('no command spec interpolates caller input', inv.every((s) => !/\$\{/.test(s.script)));
     check('getEndpointPort default is the simulator', getEndpointPort({} as NodeJS.ProcessEnv).simulated === true);
     check('getEndpointPort uses the local adapter only when enabled', getEndpointPort({ WATSON_LOCAL_ENDPOINT_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv, { config: { enabled: true, markerPath: 'x' }, readMarker: () => marker }).simulated === false);
@@ -326,6 +326,30 @@ async function main() {
     check('harness defaults to inspection-only against the simulator', h.mode === 'inspection_only' && h.simulated === true && h.repairExecuted === false);
     const h2 = await runHarness({ WATSON_HARNESS_REPAIR_ENABLE: 'true' } as unknown as NodeJS.ProcessEnv, false);
     check('harness refuses real repair when only the simulator is available', h2.mode === 'repair' && h2.repairExecuted === false && h2.notes.some((n) => /simulator|refused/i.test(n)));
+  }
+
+  console.log('\n[18] Test-only sentinel repair action (never activatable in production)');
+  {
+    __resetEventsForTests(); __resetApprovalsForTests();
+    const def = getAction('restart_sentinel_process')!;
+    check('sentinel action is testOnly + low-risk + employee approval', def.testOnly === true && def.riskTier === 'low' && def.approvalLevel === 'employee');
+    const marker: TestDeviceMarker = { tenantId: 't1', deviceId: 'dev-local-01', hostname: 'HRE-TEST', assignedUserId: 'userA', nonProduction: true };
+    const canned: Record<string, string> = { restart_sentinel_process: JSON.stringify({ restarted: true, oldPids: [10], newPid: 20 }), sentinel_health: JSON.stringify({ present: true, procId: 20, startTime: '2026-08-01T00:00:00Z' }) };
+    const runner: CommandRunner = { async run(spec) { return { ok: true, stdout: canned[spec.id] ?? '{}', exitCode: 0 }; } };
+    const port = createLocalWindowsAdapter({ config: { enabled: true, markerPath: 'x' }, runner, readMarker: () => marker });
+    const exec = createExecutor(port);
+    const dev = { tenantId: 't1', deviceId: 'dev-local-01', provider: 'rmm', hostname: 'HRE-TEST', platform: 'windows', assignedUserId: 'userA', online: true, lastSeenAt: new Date().toISOString(), managementState: 'managed' } as EndpointDevice;
+    const wcase = { caseId: 'cs', tenantId: 't1', complaint: '', playbookId: 'x', actor: EMP, device: dev, state: 'executing', evidence: [], hypotheses: [], actions: [], question: null, createdAt: '', updatedAt: '', canceled: false, simulated: false } as WatsonCase;
+    const grant = () => { const g = grantApproval({ caseId: 'cs', actionId: 'restart_sentinel_process', requesterActorId: EMP.actorId, grantedBy: EMP }); return g.ok ? g.approval.approvalId : ''; };
+    delete process.env.WATSON_ALLOW_TESTONLY;
+    const denied = await exec.runAction(EMP, wcase, 'restart_sentinel_process', {}, grant());
+    check('sentinel refused unless WATSON_ALLOW_TESTONLY=true (production-safe)', denied.status === 'denied' && denied.reason === 'testonly_not_enabled');
+    process.env.WATSON_ALLOW_TESTONLY = 'true';
+    const ok = await exec.runAction(EMP, wcase, 'restart_sentinel_process', {}, grant());
+    check('sentinel executes + verifies via re-collected evidence when enabled', ok.status === 'succeeded' && ok.verificationStatus === 'passed');
+    delete process.env.WATSON_ALLOW_TESTONLY;
+    const sh = await port.collectEvidence({ requestId: 'r', caseId: 'cs', deviceId: 'dev-local-01', evidenceType: 'sentinel_health', parameters: {}, timeoutSeconds: 5 });
+    check('sentinel_health inspection maps + parses', sh.status === 'succeeded' && (sh.facts as { present?: boolean }).present === true);
   }
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);

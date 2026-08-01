@@ -22,7 +22,8 @@ export const ALLOWED_EVIDENCE_TYPES = [
   'machine_identity',     // stable device id + hostname (read-only)
   'service_state',        // state of an ALLOWLISTED Windows service (read-only)
   'app_presence',         // presence/version of an ALLOWLISTED application (read-only)
-  'adapter_health'        // Watson local adapter health (no OS call)
+  'adapter_health',       // Watson local adapter health (no OS call)
+  'sentinel_health'       // test-only sentinel process state (read-only)
 ] as const;
 export type EvidenceType = (typeof ALLOWED_EVIDENCE_TYPES)[number];
 
@@ -186,6 +187,24 @@ export const ACTION_CATALOG: ActionDefinition[] = [
     rollbackOrCompensation: ['none_sync_is_idempotent'],
     auditFields: ['actor', 'tenant', 'device', 'actionId', 'result', 'verification'],
     changesDevice: true
+  }),
+
+  A({
+    actionId: 'restart_sentinel_process',
+    displayName: 'Restart the test sentinel process',
+    kind: 'write',
+    platform: ['windows'],
+    riskTier: 'low',
+    approvalLevel: 'employee',
+    requiredAuthority: 'employee',
+    allowedParameters: {},
+    preconditions: ['device_online', 'device_managed', 'nonproduction_only'],
+    timeoutSeconds: 60,
+    verification: ['sentinel_process_running'],
+    rollbackOrCompensation: ['sentinel_relaunches_on_next_call'],
+    auditFields: ['actor', 'tenant', 'device', 'actionId', 'result', 'verification'],
+    changesDevice: true,
+    testOnly: true
   }),
 
   // -------------------- ELEVATED (defined; NOT in the first live pilot) --------------------

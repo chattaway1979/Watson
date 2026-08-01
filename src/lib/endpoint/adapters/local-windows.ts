@@ -18,6 +18,7 @@ import type {
 } from '../contracts';
 import { isAllowedEvidenceType } from '../catalog';
 import { existsSync, readFileSync } from 'node:fs';
+import { SENTINEL_HEALTH, RESTART_SENTINEL } from './sentinel-specs';
 
 // A single, fixed, pre-reviewed command. `id` is a stable label;
 // `script` is a CONSTANT PowerShell string. There is no place for a
@@ -133,11 +134,13 @@ const EVIDENCE_COMMANDS: Record<string, (params: Record<string, unknown>) => Loc
   os_info: () => OS_INFO,
   machine_identity: () => MACHINE_IDENTITY,
   service_state: (p) => serviceStateSpec(String(p.serviceName ?? '')),
-  app_presence: (p) => appPresenceSpec(String(p.appName ?? ''))
+  app_presence: (p) => appPresenceSpec(String(p.appName ?? '')),
+  sentinel_health: () => SENTINEL_HEALTH
 };
 const ACTION_COMMANDS: Record<string, LocalCommandSpec> = {
   restart_teams: RESTART_TEAMS,
-  clear_teams_cache: CLEAR_TEAMS_CACHE
+  clear_teams_cache: CLEAR_TEAMS_CACHE,
+  restart_sentinel_process: RESTART_SENTINEL
 };
 
 // Default runner — lazily loads child_process and runs ONLY the fixed
@@ -242,5 +245,5 @@ function defaultMarkerReader(path: string): TestDeviceMarker | null {
 
 // Introspection for review/tests: the complete fixed command allowlist.
 export function localCommandInventory(): LocalCommandSpec[] {
-  return [DEVICE_HEALTH, PROCESS_HEALTH_TEAMS, TEAMS_HEALTH, EVENTLOG_APPLICATION, EVENTLOG_SYSTEM, NETWORK_HEALTH, OS_INFO, MACHINE_IDENTITY, RESTART_TEAMS, CLEAR_TEAMS_CACHE];
+  return [DEVICE_HEALTH, PROCESS_HEALTH_TEAMS, TEAMS_HEALTH, EVENTLOG_APPLICATION, EVENTLOG_SYSTEM, NETWORK_HEALTH, OS_INFO, MACHINE_IDENTITY, SENTINEL_HEALTH, RESTART_TEAMS, CLEAR_TEAMS_CACHE, RESTART_SENTINEL];
 }
