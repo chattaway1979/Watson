@@ -14,6 +14,8 @@ import { containsInternalLabel } from '../src/lib/endpoint/render';
 import type { ActionRequest, ParameterSpec } from '../src/lib/endpoint/contracts';
 import { createLocalWindowsAdapter, loadLocalAdapterConfig, localCommandInventory, type CommandRunner, type LocalCommandSpec, type TestDeviceMarker } from '../src/lib/endpoint/adapters/local-windows';
 import { getEndpointPort } from '../src/lib/endpoint/port-factory';
+import { authorizeOperation, canonicalize, testSignature, createTestFixtureVerifier, __resetNoncesForTests, type OperationRequest, type EndpointAuthzConfig, type RequestVerifier } from '../src/lib/endpoint/authz';
+import { runHarness } from './endpoint-harness';
 
 let pass = 0, fail = 0; const failures: string[] = [];
 const check = (n: string, c: boolean, d = '') => { if (c) { pass++; console.log('  ✅ ' + n); } else { fail++; failures.push(n + (d ? ` — ${d}` : '')); console.log('  ❌ ' + n + (d ? ` — ${d}` : '')); } };
@@ -263,12 +265,67 @@ async function main() {
       check('adapter refuses any unmapped / non low-risk action', bad.status === 'failed' && bad.reason === 'unsupported_action');
     }
     const inv = localCommandInventory();
-    check('command inventory is a fixed allowlist', inv.length === 8);
+    check('command inventory is a fixed allowlist', inv.length === 10);
     check('only restart/clear write to the device', inv.filter((s) => s.writesDevice).map((s) => s.id).sort().join(',') === 'clear_teams_cache,restart_teams');
     check('no command spec interpolates caller input', inv.every((s) => !/\$\{/.test(s.script)));
     check('getEndpointPort default is the simulator', getEndpointPort({} as NodeJS.ProcessEnv).simulated === true);
     check('getEndpointPort uses the local adapter only when enabled', getEndpointPort({ WATSON_LOCAL_ENDPOINT_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv, { config: { enabled: true, markerPath: 'x' }, readMarker: () => marker }).simulated === false);
     void loadLocalAdapterConfig;
+  }
+
+  console.log('\n[17] Request authorization + replay + expanded inspection + harness (no real device)');
+  {
+    __resetNoncesForTests();
+    const cfg: EndpointAuthzConfig = { allowedDeviceIds: ['dev-allow-01'], environment: 'nonproduction', killSwitchActive: false, liveSigningConfigured: false };
+    const fixture = createTestFixtureVerifier();
+    const signedReq = (over: Partial<OperationRequest> = {}): OperationRequest => {
+      const base: OperationRequest = { caseId: 'c', operationId: 'op1', actionId: 'restart_teams', parameters: {}, requesterId: 'userA', approverId: 'userB', deviceId: 'dev-allow-01', environment: 'nonproduction', issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), nonce: 'n-' + Math.random().toString(36).slice(2), correlationId: 'corr', softwareVersion: 'test', ...over };
+      const sig = over.signature ?? testSignature(canonicalize(base));
+      return { ...base, signature: sig };
+    };
+    check('valid signed request (dry-run) is authorized', authorizeOperation(signedReq(), cfg, fixture, { realExecution: false }).category === 'authorized');
+    check('kill switch blocks everything', authorizeOperation(signedReq(), { ...cfg, killSwitchActive: true }, fixture, { realExecution: false }).category === 'kill_switch_active');
+    check('non-allowlisted device denied', authorizeOperation(signedReq({ deviceId: 'other' }), cfg, fixture, { realExecution: false }).category === 'device_not_allowlisted');
+    check('production environment denied', authorizeOperation(signedReq({ environment: 'production' }), cfg, fixture, { realExecution: false }).category === 'unsupported_environment');
+    check('expired authorization denied', authorizeOperation(signedReq({ expiresAt: new Date(Date.now() - 5000).toISOString() }), cfg, fixture, { realExecution: false }).category === 'expired');
+    check('missing signature denied', authorizeOperation(signedReq({ signature: '' }), cfg, fixture, { realExecution: false }).category === 'missing_signature');
+    check('invalid signature denied', authorizeOperation(signedReq({ signature: 'testsig:deadbeef' }), cfg, fixture, { realExecution: false }).category === 'invalid_signature');
+    // Replay: a nonce is single-use.
+    const rr = signedReq({ nonce: 'fixed-nonce' });
+    check('first use of a nonce is authorized', authorizeOperation(rr, cfg, fixture, { realExecution: false }).category === 'authorized');
+    check('replayed nonce is rejected', authorizeOperation(signedReq({ nonce: 'fixed-nonce' }), cfg, fixture, { realExecution: false }).category === 'replay_detected');
+    // Runtime hard-blocks for REAL execution.
+    check('real execution refuses a test-fixture signer', authorizeOperation(signedReq(), { ...cfg, liveSigningConfigured: true }, fixture, { realExecution: true }).category === 'test_key_in_runtime');
+    const liveVerifier: RequestVerifier = { id: 'live-stub', isTestFixture: false, verify: () => true };
+    check('real execution refuses when live signing not configured', authorizeOperation(signedReq(), { ...cfg, liveSigningConfigured: false }, liveVerifier, { realExecution: true }).category === 'live_signing_required');
+
+    // Expanded inspection via the local adapter (mock runner, no OS).
+    const marker: TestDeviceMarker = { tenantId: 't1', deviceId: 'dev-local-01', hostname: 'HRE-TEST-01', assignedUserId: 'userA', nonProduction: true };
+    const canned: Record<string, string> = {
+      os_info: JSON.stringify({ edition: 'Windows 11 Pro', version: '10.0.26200', build: '26200', arch: '64-bit' }),
+      machine_identity: JSON.stringify({ deviceUuid: 'ABCD-1234-EFGH', hostname: 'HRE-TEST-01' }),
+      'service_state:Spooler': JSON.stringify({ name: 'Spooler', status: 'Running', startType: 'Automatic' }),
+      'app_presence:Teams': JSON.stringify({ app: 'Teams', present: false, version: 'unknown' })
+    };
+    const calls: LocalCommandSpec[] = [];
+    const runner: CommandRunner = { async run(spec) { calls.push(spec); return { ok: true, stdout: canned[spec.id] ?? '{}', exitCode: 0 }; } };
+    const on = createLocalWindowsAdapter({ config: { enabled: true, markerPath: 'x' }, runner, readMarker: () => marker });
+    const ev = (t: string, p: Record<string, string | number | boolean> = {}) => on.collectEvidence({ requestId: 'r', caseId: 'c', deviceId: 'dev-local-01', evidenceType: t, parameters: p, timeoutSeconds: 5 });
+    check('os_info inspection maps + parses', (await ev('os_info')).facts.edition === 'Windows 11 Pro');
+    const mi = await ev('machine_identity');
+    check('machine_identity returns a device id', typeof mi.facts.deviceUuid === 'string');
+    check('service_state (allowlisted) succeeds', (await ev('service_state', { serviceName: 'Spooler' })).status === 'succeeded' && calls.some((s) => s.id === 'service_state:Spooler'));
+    check('service_state (NOT allowlisted) is refused', (await ev('service_state', { serviceName: 'DoEvil' })).status === 'unavailable');
+    check('app_presence (allowlisted) succeeds', (await ev('app_presence', { appName: 'Teams' })).status === 'succeeded');
+    check('app_presence (NOT allowlisted) is refused', (await ev('app_presence', { appName: 'Hacker' })).status === 'unavailable');
+    const ah = await ev('adapter_health');
+    check('adapter_health reports without an OS command', ah.status === 'succeeded' && (ah.facts as { adapter?: string }).adapter === 'local-windows');
+
+    // Harness: inspection-only + repair fail-closed (simulator env).
+    const h = await runHarness({} as NodeJS.ProcessEnv, false);
+    check('harness defaults to inspection-only against the simulator', h.mode === 'inspection_only' && h.simulated === true && h.repairExecuted === false);
+    const h2 = await runHarness({ WATSON_HARNESS_REPAIR_ENABLE: 'true' } as unknown as NodeJS.ProcessEnv, false);
+    check('harness refuses real repair when only the simulator is available', h2.mode === 'repair' && h2.repairExecuted === false && h2.notes.some((n) => /simulator|refused/i.test(n)));
   }
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);

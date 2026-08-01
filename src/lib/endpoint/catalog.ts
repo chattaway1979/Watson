@@ -17,7 +17,12 @@ export const ALLOWED_EVIDENCE_TYPES = [
   'network_health',       // reachability / connectivity
   'teams_health',         // Teams version + recent crash signatures
   'm365_service_health',  // Microsoft 365 service status
-  'support_bundle'        // aggregated diagnostic bundle
+  'support_bundle',       // aggregated diagnostic bundle
+  'os_info',              // OS edition / version / build (read-only)
+  'machine_identity',     // stable device id + hostname (read-only)
+  'service_state',        // state of an ALLOWLISTED Windows service (read-only)
+  'app_presence',         // presence/version of an ALLOWLISTED application (read-only)
+  'adapter_health'        // Watson local adapter health (no OS call)
 ] as const;
 export type EvidenceType = (typeof ALLOWED_EVIDENCE_TYPES)[number];
 

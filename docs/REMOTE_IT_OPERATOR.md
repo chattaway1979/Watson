@@ -101,3 +101,49 @@ authoritative in front of it.
 set the two env vars, and run the Teams flow against that device. Until that is done on a real designated device,
 **real machine control remains unproven** (the adapter is built + unit-tested, not yet exercised live).
 Tests: self-test section [16] (suite now 89/89).
+
+
+## 002 — Expanded inspection, request authorization, and validation harness
+Branch `feat/endpoint-operator-002` (off `feat/remote-it-operator-v1`). Still **simulator/adapter-tested only — no real
+device touched.**
+
+**Expanded read-only inspection** (local adapter, fixed specs, bounded, redacted): `os_info`, `machine_identity`,
+`service_state` (CLOSED service allowlist), `app_presence` (CLOSED app allowlist), plus existing device/process/teams/event/
+network/adapter health. Service/app names are validated against an allowlist AND `^[A-Za-z0-9]+$` — the only interpolated
+value can only ever be a known token; everything else is a constant script. No generic query language, provider, path, or
+event expression is accepted.
+
+**Request authorization + replay** (`authz.ts`) sits IN FRONT of the action policy:
+`authorizeOperation()` → `policy.canPerformAction()` → executor. It binds every operation to an **allowlisted device**, a
+**non-production environment**, an **unexpired window**, a **single-use nonce (replay protection)**, and a **verified
+signature**. It **hard-blocks real execution** with a test-fixture signer (`test_key_in_runtime`) or without live signing
+(`live_signing_required`). A kill switch blocks everything. Signing/verification is an injected interface; automated tests
+use deterministic test-only fixtures that are refused at runtime.
+
+**Endpoint service boundary:** chose the **in-process adapter (Option A)** — the smallest architecture that proves the
+safety model with **no network listener** (nothing binds a socket; no inbound exposure). A localhost service can come later
+if remote inspection is required.
+
+**Validation harness** (`npm run endpoint:harness`, `scripts/endpoint-harness.ts`): **inspection-only by default**, real
+repair disabled behind a **separate** `WATSON_HARNESS_REPAIR_ENABLE` flag, refuses non-allowlisted devices, writes redacted
+structured evidence to `test-results/endpoint-harness/`, and **fails closed** — against the simulator (as here) it never
+executes a repair.
+
+**Config (all default-off / fail-closed):** `WATSON_LOCAL_ENDPOINT_ENABLED`, `WATSON_LOCAL_TESTDEVICE_MARKER`,
+`WATSON_ENDPOINT_ALLOWED_DEVICE_IDS`, `WATSON_ENDPOINT_ENVIRONMENT` (must be `nonproduction`), `WATSON_ENDPOINT_KILL_SWITCH`,
+`WATSON_ENDPOINT_LIVE_SIGNING`, `WATSON_HARNESS_REPAIR_ENABLE`, `WATSON_HARNESS_DRY_RUN`.
+
+**Threat model (summary):** the only executable surface is a fixed, pre-reviewed command allowlist run in-process on a
+designated non-production device; the LLM never supplies commands; deny-by-default across identity/device/environment/
+approval/replay/expiry/signature/verification; secrets redacted from audit and evidence; elevated/critical fail closed;
+real execution impossible without live signing on an allowlisted non-prod device with a kill switch off.
+
+**Security review:** 0 network listeners, 1 spawn site (the fixed-spec PowerShell runner only), 0 NVIDIA code references,
+dependencies unchanged. Tests: endpoint self-test **109/109** (adds authz/replay/expiry/device/env/kill-switch, expanded
+inspection, harness fail-closed). NVIDIA compatibility spike: `docs/NVIDIA_SPIKE.md` (adopt nothing now; OpenShell + NeMo
+Agent Toolkit later for the reasoning host; NIM/Riva deferred to GPU/voice). **NVIDIA does not help the real-device
+blocker.**
+
+**Still required for a real one-device proof:** a designated non-production Windows test PC (not an employee machine) with
+the marker file + `WATSON_LOCAL_ENDPOINT_ENABLED=true` + the device allowlisted + live signing configured; then run the
+harness in repair mode on that device. Until that runs, **real machine control remains unproven.**
