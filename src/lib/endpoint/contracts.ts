@@ -77,6 +77,7 @@ export interface ActionDefinition {
   auditFields: string[];
   // Whether this action changes the computer (drives employee-visible disclosure).
   changesDevice: boolean;
+  testOnly?: boolean; // refused unless WATSON_ALLOW_TESTONLY=true (never production)
 }
 
 export interface ParameterSpec {

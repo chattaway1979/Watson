@@ -18,6 +18,7 @@ import type {
 } from '../contracts';
 import { isAllowedEvidenceType } from '../catalog';
 import { existsSync, readFileSync } from 'node:fs';
+import { SENTINEL_HEALTH, RESTART_SENTINEL } from './sentinel-specs';
 
 // A single, fixed, pre-reviewed command. `id` is a stable label;
 // `script` is a CONSTANT PowerShell string. There is no place for a
@@ -99,6 +100,28 @@ const CLEAR_TEAMS_CACHE: LocalCommandSpec = {
   script: "Get-Process -Name ms-teams,Teams -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; $cache=Join-Path $env:APPDATA 'Microsoft\\Teams'; if(Test-Path $cache){ Remove-Item (Join-Path $cache 'Cache') -Recurse -Force -ErrorAction SilentlyContinue }; [pscustomobject]@{ cacheCleared=$true } | ConvertTo-Json -Compress"
 };
 
+const OS_INFO: LocalCommandSpec = {
+  id: 'os_info', writesDevice: false, description: 'OS edition/version/build (read-only).',
+  script: "$o=Get-CimInstance Win32_OperatingSystem; [pscustomobject]@{ edition=$o.Caption; version=$o.Version; build=$o.BuildNumber; arch=$o.OSArchitecture } | ConvertTo-Json -Compress"
+};
+const MACHINE_IDENTITY: LocalCommandSpec = {
+  id: 'machine_identity', writesDevice: false, description: 'Stable device id + hostname (read-only).',
+  script: "$p=Get-CimInstance Win32_ComputerSystemProduct; [pscustomobject]@{ deviceUuid=$p.UUID; hostname=$env:COMPUTERNAME } | ConvertTo-Json -Compress"
+};
+// Read-only state/presence for a CLOSED allowlist only. The only interpolated
+// value is a token proven to be an allowlist member AND alphanumeric.
+export const SERVICE_ALLOWLIST = ['Spooler', 'Dnscache', 'W32Time', 'wuauserv', 'WSearch'] as const;
+export const APP_ALLOWLIST = ['Teams', 'Bluebeam', 'Outlook', 'OneDrive'] as const;
+function serviceStateSpec(name: string): LocalCommandSpec | null {
+  if (!(SERVICE_ALLOWLIST as readonly string[]).includes(name) || !/^[A-Za-z0-9]+$/.test(name)) return null;
+  return { id: `service_state:${name}`, writesDevice: false, description: `State of the ${name} service (read-only).`,
+    script: `$s=Get-Service -Name ${name} -ErrorAction SilentlyContinue; [pscustomobject]@{ name='${name}'; status=[string]$s.Status; startType=[string]$s.StartType } | ConvertTo-Json -Compress` };
+}
+function appPresenceSpec(name: string): LocalCommandSpec | null {
+  if (!(APP_ALLOWLIST as readonly string[]).includes(name) || !/^[A-Za-z0-9]+$/.test(name)) return null;
+  return { id: `app_presence:${name}`, writesDevice: false, description: `Presence/version of ${name} (read-only).`,
+    script: `[pscustomobject]@{ app='${name}'; present=$false; version='unknown' } | ConvertTo-Json -Compress` };
+}
 const EVIDENCE_COMMANDS: Record<string, (params: Record<string, unknown>) => LocalCommandSpec | null> = {
   device_health: () => DEVICE_HEALTH,
   process_health: () => PROCESS_HEALTH_TEAMS,
@@ -107,11 +130,17 @@ const EVIDENCE_COMMANDS: Record<string, (params: Record<string, unknown>) => Loc
   // event log: SELECT a fixed spec by validated enum — no interpolation.
   event_logs: (p) => (p.logName === 'System' ? EVENTLOG_SYSTEM : p.logName === 'Application' ? EVENTLOG_APPLICATION : null),
   m365_service_health: () => null, // service-side; not a local command
-  support_bundle: () => DEVICE_HEALTH // minimal bundle stand-in
+  support_bundle: () => DEVICE_HEALTH, // minimal bundle stand-in
+  os_info: () => OS_INFO,
+  machine_identity: () => MACHINE_IDENTITY,
+  service_state: (p) => serviceStateSpec(String(p.serviceName ?? '')),
+  app_presence: (p) => appPresenceSpec(String(p.appName ?? '')),
+  sentinel_health: () => SENTINEL_HEALTH
 };
 const ACTION_COMMANDS: Record<string, LocalCommandSpec> = {
   restart_teams: RESTART_TEAMS,
-  clear_teams_cache: CLEAR_TEAMS_CACHE
+  clear_teams_cache: CLEAR_TEAMS_CACHE,
+  restart_sentinel_process: RESTART_SENTINEL
 };
 
 // Default runner — lazily loads child_process and runs ONLY the fixed
@@ -175,6 +204,9 @@ export function createLocalWindowsAdapter(deps: LocalAdapterDeps = {}): Endpoint
     async collectEvidence(request) {
       if (!enabled()) return unavailable(request, 'adapter_disabled');
       if (!isAllowedEvidenceType(request.evidenceType)) return unavailable(request, 'unsupported_evidence_type');
+      if (request.evidenceType === 'adapter_health') {
+        return { requestId: request.requestId, collectedAt: new Date().toISOString(), source: 'local-windows', status: 'succeeded', facts: { adapter: 'local-windows', enabled: true, simulated: false, commandCount: localCommandInventory().length }, redactions: [], provenance: { provider: 'local-windows', simulated: false } };
+      }
       const build = EVIDENCE_COMMANDS[request.evidenceType];
       const spec = build ? build(request.parameters ?? {}) : null;
       if (!spec) return unavailable(request, 'no_local_command');
@@ -213,5 +245,5 @@ function defaultMarkerReader(path: string): TestDeviceMarker | null {
 
 // Introspection for review/tests: the complete fixed command allowlist.
 export function localCommandInventory(): LocalCommandSpec[] {
-  return [DEVICE_HEALTH, PROCESS_HEALTH_TEAMS, TEAMS_HEALTH, EVENTLOG_APPLICATION, EVENTLOG_SYSTEM, NETWORK_HEALTH, RESTART_TEAMS, CLEAR_TEAMS_CACHE];
+  return [DEVICE_HEALTH, PROCESS_HEALTH_TEAMS, TEAMS_HEALTH, EVENTLOG_APPLICATION, EVENTLOG_SYSTEM, NETWORK_HEALTH, OS_INFO, MACHINE_IDENTITY, SENTINEL_HEALTH, RESTART_TEAMS, CLEAR_TEAMS_CACHE, RESTART_SENTINEL];
 }
