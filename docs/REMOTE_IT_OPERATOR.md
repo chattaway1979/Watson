@@ -77,3 +77,27 @@ Regression tests added (self-test section [15]); suite now 73/73.
    fail-closed local adapter may run typed, pre-reviewed commands.
 
 The provider-neutral `EndpointOperationsPort` seam is ready — connecting any of the above is an adapter, not a redesign.
+
+
+## Local Windows test-device adapter (real path, fail-closed)
+`src/lib/endpoint/adapters/local-windows.ts` is a **real** `EndpointOperationsPort` for one designated
+**non-production** Windows test computer. It executes ONLY fixed, pre-reviewed PowerShell command specs
+(selection by validated enum — never interpolation of model/caller input) via an **injectable runner**, so
+the command mapping and fail-closed behaviour are unit-tested without running anything on an OS.
+
+**Fail-closed by design — it touches no machine unless BOTH:**
+1. `WATSON_LOCAL_ENDPOINT_ENABLED=true`, and
+2. a valid marker file exists at `WATSON_LOCAL_TESTDEVICE_MARKER` (default `C:\watson-nonprod-testdevice.marker`)
+   with `nonProduction: true` (template: `docs/watson-nonprod-testdevice.marker.example.json`).
+
+Otherwise `getEndpointPort()` returns the **simulator** and the adapter refuses all operations
+(`resolveDevicesForUser → []`, `collectEvidence → unavailable(adapter_disabled)`, `executeAction → failed(adapter_disabled)`),
+never invoking a command. It only maps the read-only evidence set + `restart_teams` / `clear_teams_cache`; any other
+action returns `unsupported_action`. Provenance is `simulated: false` so real and simulated results never mix.
+The deterministic policy gate + executor (approval, verification, audit, timeout, elevated-fail-closed) remain
+authoritative in front of it.
+
+**To run the real pilot, the owner must:** designate a non-production Windows test PC, place the marker file on it,
+set the two env vars, and run the Teams flow against that device. Until that is done on a real designated device,
+**real machine control remains unproven** (the adapter is built + unit-tested, not yet exercised live).
+Tests: self-test section [16] (suite now 89/89).

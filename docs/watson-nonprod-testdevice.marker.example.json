@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to the path in WATSON_LOCAL_TESTDEVICE_MARKER (default C:\\watson-nonprod-testdevice.marker) ONLY on a designated NON-PRODUCTION Windows test computer. The local adapter fails closed unless this file exists AND nonProduction === true. Never place this on an employee production machine.",
+  "tenantId": "de9690ca-bd89-4457-bd8c-1bXXXXXXXXXX",
+  "deviceId": "watson-testpc-01",
+  "hostname": "HRE-TESTPC-01",
+  "assignedUserId": "c.hattaway@hrelectriccompany.com",
+  "nonProduction": true
+}

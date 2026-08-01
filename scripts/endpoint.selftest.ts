@@ -12,6 +12,8 @@ import { appendEvent, eventsForCase, __resetEventsForTests } from '../src/lib/en
 import { buildEscalation } from '../src/lib/endpoint/escalation';
 import { containsInternalLabel } from '../src/lib/endpoint/render';
 import type { ActionRequest, ParameterSpec } from '../src/lib/endpoint/contracts';
+import { createLocalWindowsAdapter, loadLocalAdapterConfig, localCommandInventory, type CommandRunner, type LocalCommandSpec, type TestDeviceMarker } from '../src/lib/endpoint/adapters/local-windows';
+import { getEndpointPort } from '../src/lib/endpoint/port-factory';
 
 let pass = 0, fail = 0; const failures: string[] = [];
 const check = (n: string, c: boolean, d = '') => { if (c) { pass++; console.log('  ✅ ' + n); } else { fail++; failures.push(n + (d ? ` — ${d}` : '')); console.log('  ❌ ' + n + (d ? ` — ${d}` : '')); } };
@@ -216,6 +218,57 @@ async function main() {
     const evts = eventsForCase('cR');
     const started = evts.find((e) => e.type === 'action_executed' && (e.data as { phase?: string }).phase === 'started');
     check('execution audit records provider + simulated', (started?.data as { provider?: string })?.provider === 'simulator' && (started?.data as { simulated?: boolean })?.simulated === true);
+  }
+
+  console.log('\n[16] Local Windows adapter — fail-closed + typed command mapping (no real device touched)');
+  {
+    const marker: TestDeviceMarker = { tenantId: 't1', deviceId: 'dev-local-01', hostname: 'HRE-TEST-01', assignedUserId: 'userA', nonProduction: true };
+    const canned: Record<string, string> = {
+      device_health: JSON.stringify({ online: true, uptimeHours: 30, pendingRestart: false, cpuPct: 20, memoryPct: 40, diskFreeGb: 100, diskTotalGb: 512 }),
+      process_health: JSON.stringify({ processName: 'Teams', state: 'running', pid: 1, memoryMB: 500 }),
+      'event_logs:System': JSON.stringify([{ Id: 7036, LevelDisplayName: 'Information' }]),
+      restart_teams: JSON.stringify({ restarted: true })
+    };
+    const mk = () => { const calls: LocalCommandSpec[] = []; const runner: CommandRunner = { async run(spec) { calls.push(spec); return { ok: true, stdout: canned[spec.id] ?? '{}', exitCode: 0 }; } }; return { calls, runner }; };
+
+    { // DISABLED by default -> fail closed; the runner is NEVER called.
+      const { calls, runner } = mk();
+      const off = createLocalWindowsAdapter({ config: { enabled: false, markerPath: 'x' }, runner, readMarker: () => marker });
+      const devs = await off.resolveDevicesForUser('t1', 'userA');
+      const ev = await off.collectEvidence({ requestId: 'r', caseId: 'c', deviceId: 'dev-local-01', evidenceType: 'device_health', parameters: {}, timeoutSeconds: 5 });
+      const ac = await off.executeAction({ requestId: 'r', caseId: 'c', actorId: 'userA', deviceId: 'dev-local-01', actionId: 'restart_teams', parameters: {} });
+      check('adapter disabled by default -> no devices', devs.length === 0);
+      check('adapter disabled -> evidence unavailable (fail closed)', ev.status === 'unavailable' && (ev.facts as { reason?: string }).reason === 'adapter_disabled');
+      check('adapter disabled -> action fails closed', ac.status === 'failed' && ac.reason === 'adapter_disabled');
+      check('adapter disabled -> NO command ever executed', calls.length === 0);
+    }
+    { // Marker not marked non-production -> stays disabled.
+      const { runner } = mk();
+      const a = createLocalWindowsAdapter({ config: { enabled: true, markerPath: 'x' }, runner, readMarker: () => ({ ...marker, nonProduction: false }) });
+      check('production marker -> adapter refuses (no devices)', (await a.resolveDevicesForUser('t1', 'userA')).length === 0);
+    }
+    { // ENABLED + valid non-prod marker -> real path exercised with a MOCK runner.
+      const { calls, runner } = mk();
+      const on = createLocalWindowsAdapter({ config: { enabled: true, markerPath: 'x' }, runner, readMarker: () => marker });
+      const devs = await on.resolveDevicesForUser('t1', 'userA');
+      check('enabled+marker -> resolves the designated test device', devs.length === 1 && devs[0].deviceId === 'dev-local-01');
+      check('adapter reports NOT simulated (real provenance)', on.simulated === false && on.providerId === 'local-windows');
+      const ev = await on.collectEvidence({ requestId: 'r', caseId: 'c', deviceId: 'dev-local-01', evidenceType: 'device_health', parameters: {}, timeoutSeconds: 5 });
+      check('device_health maps to fixed command + parses facts', ev.status === 'succeeded' && (ev.facts as { memoryPct?: number }).memoryPct === 40 && ev.provenance.simulated === false);
+      const evLog = await on.collectEvidence({ requestId: 'r2', caseId: 'c', deviceId: 'dev-local-01', evidenceType: 'event_logs', parameters: { logName: 'System' }, timeoutSeconds: 5 });
+      check('event_logs selects the fixed System command (no interpolation)', evLog.status === 'succeeded' && calls.some((s) => s.id === 'event_logs:System'));
+      const act = await on.executeAction({ requestId: 'r3', caseId: 'c', actorId: 'userA', deviceId: 'dev-local-01', actionId: 'restart_teams', parameters: {} });
+      check('restart_teams executes the fixed command', act.status === 'succeeded' && calls.some((s) => s.id === 'restart_teams'));
+      const bad = await on.executeAction({ requestId: 'r4', caseId: 'c', actorId: 'userA', deviceId: 'dev-local-01', actionId: 'reset_user_password', parameters: {} });
+      check('adapter refuses any unmapped / non low-risk action', bad.status === 'failed' && bad.reason === 'unsupported_action');
+    }
+    const inv = localCommandInventory();
+    check('command inventory is a fixed allowlist', inv.length === 8);
+    check('only restart/clear write to the device', inv.filter((s) => s.writesDevice).map((s) => s.id).sort().join(',') === 'clear_teams_cache,restart_teams');
+    check('no command spec interpolates caller input', inv.every((s) => !/\$\{/.test(s.script)));
+    check('getEndpointPort default is the simulator', getEndpointPort({} as NodeJS.ProcessEnv).simulated === true);
+    check('getEndpointPort uses the local adapter only when enabled', getEndpointPort({ WATSON_LOCAL_ENDPOINT_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv, { config: { enabled: true, markerPath: 'x' }, readMarker: () => marker }).simulated === false);
+    void loadLocalAdapterConfig;
   }
 
   console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);

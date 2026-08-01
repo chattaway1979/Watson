@@ -10,3 +10,5 @@ export * from './escalation';
 export * as render from './render';
 export { createOperator } from './orchestrator';
 export type { OperatorResult, HandleOptions } from './orchestrator';
+export * from './adapters/local-windows';
+export { getEndpointPort } from './port-factory';
